@@ -97,7 +97,7 @@ public enum SuiteGenerator {
             return (BetSizes(river: .same(.init(bet: "33, 75", raise: "60"))), 2)
         case .turn:
             return (BetSizes(turn: .same(.init(bet: "33, 75", raise: "60")), river: .same(.init(bet: "33, 75", raise: "60"))), 1)
-        case .flop:
+        case .flop, .preflop:
             return (BetSizes.standard, 1)
         }
     }
@@ -115,7 +115,7 @@ public enum SuiteGenerator {
         var pot = scenario.pot
         var stack = scenario.stack
         var history: [HistoryEntry] = []
-        for street in Street.allCases where street < root {
+        for street in Street.postflop where street < root {
             if street > .flop {
                 history.append(HistoryEntry(street: street, seat: nil, action: nil, potBefore: pot,
                                             card: board[street.boardCount - 1].description, synthetic: true))
@@ -277,7 +277,7 @@ public enum SuiteGenerator {
             let (n, p, h, hand) = fresh[Int(rng.next() % UInt64(fresh.count))]
             used.insert("\(p)|\(hand.combo)")
             let seat = n.player!
-            let actions = n.actions.map(SpotAction.init)
+            let actions = n.actions.map { SpotAction($0) }
             out.append(Decision(
                 id: "spot\(index)-\(out.count)", scenarioId: scenario.id, scenarioName: scenario.name,
                 preflopSummary: scenario.summary, positions: [scenario.oopName, scenario.ipName], heroSeat: seat,

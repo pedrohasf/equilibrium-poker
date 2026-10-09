@@ -13,6 +13,8 @@ public enum ArenaCLI {
       eqbench arena show <match-id> [hand#] [--probs]
                                                Summary, or a PokerStars-style hand history
       eqbench arena leaderboard                Ratings across all saved matches
+      eqbench arena export [--out web/data/arena.json] [--min-hands 100] [--pretty]
+                                               Matches, pooled per-opponent results and ratings for the website
       eqbench arena bots                       Built-in bots
       eqbench arena decision-models            Live catalog of System One decision models
 
@@ -37,6 +39,7 @@ public enum ArenaCLI {
         case "list": list()
         case "show": try show(rest)
         case "leaderboard": leaderboard()
+        case "export": try export(rest)
         case "bots": bots()
         case "decision-models", "dm": try await decisionModels()
         default: print(usage)
@@ -215,6 +218,20 @@ public enum ArenaCLI {
                   + pad("\(e.hands)", 8, right: true) + pad("\(e.matches)", 9, right: true))
         }
         print("\nRating: Bradley–Terry (Elo scale, mean 1500); each match scores the share of big blinds won across duplicate pairs.\nW-L-T counts duplicate pairs. Self-play matches are excluded.")
+    }
+
+    static func export(_ args: [String]) throws {
+        var rest = args
+        let out = option("--out", &rest).map { URL(fileURLWithPath: $0) } ?? ArenaExport.defaultOutputURL()
+        let minHands = Int(option("--min-hands", &rest) ?? "") ?? ArenaExport.defaultMinHands
+        let pretty = flag("--pretty", &rest)
+        let all = MatchStore.all()
+        let doc = ArenaExport.document(matches: all, minHands: minHands)
+        try ArenaExport.write(doc, to: out, pretty: pretty)
+        let n = ArenaExport.included(all, minHands: minHands)
+        let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
+        print("Exported \(n.count) matches (\(n.filter { $0.players.contains(where: \.isDecisionModel) }.count) with decision models; "
+              + "\(all.count - n.count) excluded: < \(minHands) hands or self-play) → \(out.path) (\(size / 1024) KB)")
     }
 
     static func decisionModels() async throws {

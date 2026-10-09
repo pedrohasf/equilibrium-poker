@@ -37,3 +37,19 @@ final class SolverKitTests: XCTestCase {
         XCTAssertEqual(eq, 0.82, accuracy: 0.02)
     }
 }
+
+final class PreflopSolverTests: XCTestCase {
+    func testPushFold10bbMatchesNash() throws {
+        let s = try PreflopSolver(config: .pushFold(stack: 10))
+        let p = try s.solve()
+        XCTAssertLessThan(p.exploitability, 5)
+        let root = try s.query()
+        XCTAssertEqual(root.street, "preflop")
+        XCTAssertEqual(root.player, 0)
+        let jam = root.actions.firstIndex { $0.kind == .allin }!
+        XCTAssertEqual(root.actionFrequencies[jam], 0.58, accuracy: 0.03)
+        let bb = try s.query([jam])
+        XCTAssertEqual(bb.player, 1)
+        XCTAssertEqual(bb.actionFrequencies[1], 0.37, accuracy: 0.03)
+    }
+}

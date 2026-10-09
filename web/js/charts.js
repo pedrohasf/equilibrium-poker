@@ -3,7 +3,7 @@ import { esc, fmt, ttRows, bindTips, shortName } from "./util.js";
 
 const NS = 'xmlns="http://www.w3.org/2000/svg"';
 
-function linear(d0, d1, r0, r1) {
+export function linear(d0, d1, r0, r1) {
   const f = (v) => r0 + ((v - d0) / (d1 - d0 || 1)) * (r1 - r0);
   f.domain = [d0, d1];
   return f;
@@ -14,7 +14,7 @@ function logScale(d0, d1, r0, r1) {
   f.domain = [d0, d1];
   return f;
 }
-function niceTicks(lo, hi, count = 5) {
+export function niceTicks(lo, hi, count = 5) {
   const span = hi - lo, raw = span / count;
   const mag = 10 ** Math.floor(Math.log10(raw));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => span / s <= count) ?? raw;
@@ -29,13 +29,14 @@ function logTicks(lo, hi) {
   }
   return out;
 }
-const textWidth = (s, px = 12) => s.length * px * 0.56;
+export const textWidth = (s, px = 12) => s.length * px * 0.56;
 
 /**
  * Rows chart: one row per player, a label column, a shared x axis on top, and per-row marks.
  * opts: { el, rows:[{key,label,base?,tip}], x:{lo,hi,log?,fmt,ticks?}, marks(row, x, cy) → svg, refs?:[{v,label}], aria }
  */
-function rowsChart(el, opts) {
+export function rowsChart(el, opts) {
+  if (!el.clientWidth) return; // hidden (other view mode): drawn when it becomes visible
   const W = Math.max(280, el.clientWidth);
   const narrow = W < 520;
   const rowH = opts.rowH ?? 30;
@@ -51,6 +52,9 @@ function rowsChart(el, opts) {
     s += `<line class="grid" x1="${tx}" x2="${tx}" y1="${top - 6}" y2="${H - 6}"/>`;
     s += `<text class="tick-t" x="${tx}" y="${top - 12}" text-anchor="middle">${esc(opts.x.fmt(t))}</text>`;
   }
+  if (opts.zero != null && opts.zero >= opts.x.lo && opts.zero <= opts.x.hi) {
+    s += `<line class="axis" x1="${x(opts.zero)}" x2="${x(opts.zero)}" y1="${top - 6}" y2="${H - 6}" stroke-width="1.5"/>`;
+  }
   // Reference lines (baselines), labels staggered to avoid collisions.
   let lastRefX = -1e9, lane = 0;
   for (const r of (opts.refs ?? []).slice().sort((a, b) => a.v - b.v)) {
@@ -65,6 +69,10 @@ function rowsChart(el, opts) {
   }
   opts.rows.forEach((row, i) => {
     const cy = top + i * rowH + rowH / 2;
+    if (row.header) {
+      s += `<text class="grp" x="4" y="${cy + 8}">${esc(row.label)}</text><line class="grid" x1="4" x2="${W - 4}" y1="${cy + 13}" y2="${cy + 13}"/>`;
+      return;
+    }
     let label = narrow || opts.short ? row.short ?? row.label : row.label;
     const maxChars = Math.floor((labelW - 4) / 6.6);
     if (label.length > maxChars) label = label.slice(0, maxChars - 1) + "…";
@@ -78,7 +86,7 @@ function rowsChart(el, opts) {
   el.innerHTML = s;
 }
 
-const dot = (cx, cy, color, r = 5, hollow = false) =>
+export const dot = (cx, cy, color, r = 5, hollow = false) =>
   `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${hollow ? "var(--surface)" : color}" stroke="${hollow ? color : "var(--surface)"}" stroke-width="2"/>` +
   (hollow ? "" : "");
 
@@ -143,6 +151,7 @@ export function renderCharts(data, root) {
   const priced = dms.filter((p) => p.cost && p.cost.per1k > 0);
   charts.push(["ch-cost", (el) => {
     if (!priced.length) { el.innerHTML = `<p class="footnote">No cost data yet.</p>`; return; }
+    if (!el.clientWidth) return;
     const W = Math.max(280, el.clientWidth), H = Math.round(Math.min(380, Math.max(260, W * 0.68)));
     const m = { l: 40, r: 16, t: 14, b: 34 };
     const xs = priced.map((p) => p.cost.per1k);

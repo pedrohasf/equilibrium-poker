@@ -398,4 +398,299 @@ final class BenchKitTests: XCTestCase {
         }
         XCTAssertThrowsError(try BenchCLI.resolveModels(["dm:new/model"], decisionCatalog: catalog))
     }
+
+    // MARK: - Hands suites, variants, post-hoc players
+
+    /// Two hands: h1 = d001 (seat 1) + d002 (seat 0), h2 = d003 (seat 1).
+    func handsSuite() -> BenchmarkSuite {
+        var a = makeDecision(id: "d001"), b = makeDecision(id: "d002", street: .turn), c = makeDecision(id: "d003")
+        b.heroSeat = 0
+        a.handId = "h001"; a.handSeq = 0
+        b.handId = "h001"; b.handSeq = 1
+        c.handId = "h002"; c.handSeq = 0
+        let p = SuiteParameters.hands(2, handsPerSolve: 2)
+        return BenchmarkSuite(id: "hs", name: "hs", parameters: p, decisions: [a, b, c], solves: 1, generationSeconds: 0)
+    }
+
+    func run(_ model: String, _ choices: [String: Int?], probs: [String: [Double]] = [:], variant: String? = nil) -> BenchmarkRun {
+        var r = BenchmarkRun(suiteId: "hs", model: model, displayName: model, kind: .decisionModel, variant: variant)
+        r.results = choices.sorted { $0.key < $1.key }.map { id, c in
+            DecisionResult(decisionId: id, choice: c, actionProbabilities: probs[id] ?? c.map { i in (0..<3).map { $0 == i ? 1 : 0 } })
+        }
+        return r
+    }
+
+    func testHandMetricsBbPer100() {
+        let suite = handsSuite()
+        XCTAssertTrue(suite.isHands)
+        XCTAssertEqual(suite.handIds, ["h001", "h002"])
+        // EVs [0, 1, 3]: losses call 2, fold 3, raise 0.
+        let r = run("m/a", ["d001": 1, "d002": 0, "d003": 2], probs: ["d001": [0, 0.5, 0.5]])
+        let m = Scoring.summarize(r, suite: suite).perHand!
+        // h1: (2 + 3) / 2 = 2.5 bb per seat-hand; h2: 0 → mean 1.25 bb → 125 bb/100.
+        XCTAssertEqual(m.hands, 2)
+        XCTAssertEqual(m.bbPer100, 125, accuracy: 1e-9)
+        XCTAssertEqual(m.bbPer100CI, 1.96 * (Scoring.meanCI([250, 0]).ci / 1.96), accuracy: 1e-9)
+        // Mixed: d001 0.5·2 = 1, d002 one-hot fold 3, d003 0 → h1 4/2 = 2, h2 0 → 100.
+        XCTAssertEqual(m.mixedBbPer100!, 100, accuracy: 1e-9)
+        XCTAssertEqual(m.bySeat["IP"]!, 100 * (2 + 0) / 2, accuracy: 1e-9)
+        XCTAssertEqual(m.bySeat["OOP"]!, 100 * 3 / 2, accuracy: 1e-9)
+        // Incomplete hands are excluded.
+        let partial = run("m/b", ["d001": 1, "d003": 2])
+        XCTAssertEqual(Scoring.summarize(partial, suite: suite).perHand!.hands, 1)
+        // Spot suites have no per-hand metrics.
+        let spots = BenchmarkSuite(id: "hs", name: "s", parameters: SuiteParameters(decisions: 3), decisions: suite.decisions, solves: 1, generationSeconds: 0)
+        XCTAssertNil(Scoring.summarize(r, suite: spots).perHand)
+        let text = BenchCLI.leaderboardText(suite: suite, rows: Scoring.leaderboard(suite: suite, runs: [r]))
+        XCTAssertTrue(text.contains("bb/100 lost"))
+    }
+
+    func testPairedComparison() {
+        let suite = handsSuite()
+        let good = run("m/good", ["d001": 2, "d002": 2, "d003": 2])
+        let bad = run("m/bad", ["d001": 1, "d002": 0, "d003": 2])
+        let p = Scoring.paired(good, bad, suite: suite)
+        XCTAssertEqual(p.score.n, 3)
+        // Scores good 100,100,100 vs bad 33.3, 0, 100 → diffs 66.7, 100, 0.
+        XCTAssertEqual(p.score.mean, (200.0 / 3 + 100) / 3, accuracy: 1e-9)
+        // bb/100 per hand: h1 good 0 vs bad 250 → −250; h2 0.
+        XCTAssertEqual(p.bbPer100!.mean, -125, accuracy: 1e-9)
+        XCTAssertEqual(p.bbPer100!.n, 2)
+        let text = BenchCLI.compareText(suite: suite, runs: [good, bad], reference: bad)
+        XCTAssertTrue(text.contains("(ref)"))
+        XCTAssertTrue(text.contains("m/good [v2]"))
+    }
+
+    func testVariantRunIdsAndLabels() {
+        XCTAssertEqual(BenchmarkRun.makeId(suiteId: "s", model: "a/b", variant: "v2"), BenchmarkRun.makeId(suiteId: "s", model: "a/b"))
+        XCTAssertEqual(BenchmarkRun.makeId(suiteId: "s", model: "a/b", variant: "eq"), "s__a_b__eq")
+        let r = BenchmarkRun(suiteId: "s", model: "a/b", displayName: "a/b", kind: .decisionModel, variant: "eq")
+        XCTAssertEqual(r.label, "a/b [eq]")
+        XCTAssertEqual(BenchmarkRun(suiteId: "s", model: "a/b", displayName: "a/b", kind: .decisionModel).label, "a/b [v2]")
+        XCTAssertEqual(BenchmarkRun(suiteId: "s", model: "baseline:gto", displayName: "GTO", kind: .baseline).label, "GTO")
+        XCTAssertNotNil(try? BenchCLI.resolveVariants(["eq", "noul"]))
+        XCTAssertThrowsError(try BenchCLI.resolveVariants(["nope"]))
+        XCTAssertEqual(try BenchCLI.findRun("a/b [eq]", in: [r]).id, r.id)
+    }
+
+    func testEveryVariantKeepsActionKeys() {
+        let d = makeDecision()
+        let keys = Set(DecisionStateBuilder.actionKeys(d.actions))
+        XCTAssertEqual(Set(DecisionVariants.ids), ["v2", "minimal", "eq", "eqrange", "coach", "multi", "noul", "nuts", "shortstack"])
+        for v in DecisionVariants.all {
+            let (state, qs) = v.build(d)
+            XCTAssertFalse(qs.isEmpty, v.id)
+            let text = v.requestBody(d).prettyText
+            XCTAssertFalse(text.contains("QhQd") || text.contains("Qh Qd"), "\(v.id) leaks villain cards")
+            XCTAssertFalse(text.contains("\"equity\" :"), "\(v.id) leaks solver equity")
+            XCTAssertNotEqual(state, .null)
+            for (id, q) in qs {
+                switch q {
+                case .choice(_, let c): XCTAssertEqual(Set(c.keys), keys, "\(v.id).\(id)")
+                case .noul: XCTAssertTrue(id.hasPrefix(DecisionVariants.noulPrefix) && keys.contains(String(id.dropFirst(5))), id)
+                case .score: XCTFail("unexpected score question")
+                }
+            }
+        }
+        XCTAssertEqual(DecisionVariants.v2.build(d).state, DecisionStateBuilder.state(d), "v2 is the legacy state")
+        // eq adds Monte-Carlo equity vs the villain's preflop range.
+        let eq = DecisionVariants.eq.requestBody(d).prettyText
+        XCTAssertTrue(eq.contains("equity_vs_villain_preflop_range_pct"))
+        XCTAssertTrue(eq.contains("needed to call"))
+        XCTAssertTrue(DecisionVariants.eqrange.requestBody(d).prettyText.contains("equity_vs_villain_likely_range_pct"))
+        XCTAssertFalse(DecisionVariants.minimal.requestBody(d).prettyText.contains("made_hand"))
+        XCTAssertEqual(DecisionVariants.multi.build(d).questions.count, 3)
+        XCTAssertEqual(DecisionVariants.noul.build(d).questions.count, 3)
+    }
+
+    func testMultiAndNoulInterpretation() {
+        let d = makeDecision()
+        let multi = DecideResult(model: "m", answers: [
+            "action": .choice(choice: "call", confidence: 0.5, probabilities: ["call": 0.6, "raise_to_15bb": 0.4]),
+            "action_coach": .choice(choice: "raise_to_15bb", confidence: 0.7, probabilities: ["raise_to_15bb": 1]),
+            "action_solver": .choice(choice: "bogus", confidence: 0.9, probabilities: [:]),
+        ], usage: APIUsage(promptTokens: 100, cost: 0.001))
+        let r = DecisionVariants.multi.interpret(multi, d)
+        XCTAssertEqual(r.actionProbabilities!, [0, 0.3, 0.7])
+        XCTAssertEqual(r.choice, 2)
+        XCTAssertEqual(r.confidence!, 0.6, accuracy: 1e-12)
+        XCTAssertEqual(r.parts?.count, 3)
+        XCTAssertNil(r.parts?[2].probabilities)
+        XCTAssertEqual(r.cost, 0.001)
+        XCTAssertNil(DecisionVariants.multi.interpret(DecideResult(model: "m", answers: [:]), d).choice)
+
+        let noul = DecideResult(model: "m", answers: ["best_fold": .noul(probability: 0.1), "best_call": .noul(probability: 0.3),
+                                                      "best_raise_to_15bb": .noul(probability: 0.6)])
+        let n = DecisionVariants.noul.interpret(noul, d)
+        XCTAssertEqual(n.choice, 2)
+        XCTAssertEqual(n.actionProbabilities![0], 0.1, accuracy: 1e-12)
+        XCTAssertEqual(n.actionProbabilities![2], 0.6, accuracy: 1e-12)
+        XCTAssertEqual(n.parts?.map(\.pTrue), [0.1, 0.3, 0.6])
+        let missing = DecisionVariants.noul.interpret(DecideResult(model: "m", answers: ["best_fold": .noul(probability: 0.1)]), d)
+        XCTAssertNil(missing.choice)
+        XCTAssertNotNil(missing.error)
+    }
+
+    func testSynthMath() throws {
+        XCTAssertEqual(Synth.average([[1, 0, 0], [0, 2, 2]])!, [0.5, 0.25, 0.25])
+        XCTAssertEqual(Synth.average([[1, 0], [0, 1]], weights: [3, 1])!, [0.75, 0.25])
+        XCTAssertNil(Synth.average([[0, 0]]))
+        let t = Synth.temper([0.2, 0.8], tau: 2)
+        XCTAssertEqual(t[1], 0.64 / 0.68, accuracy: 1e-12)
+        XCTAssertEqual(Synth.temper([0.2, 0.8], tau: 1), [0.2, 0.8])
+        XCTAssertEqual(Synth.temper([0.3, 0.7, 0], tau: .infinity), [0, 1, 0])
+        XCTAssertEqual(Synth.temper([0.5, 0.25, 0.25], tau: 0.5)[0], 0.5.squareRoot() / (0.5.squareRoot() + 2 * 0.25.squareRoot()), accuracy: 1e-12)
+
+        let d = makeDecision() // facing 5 into 10: needs 33%
+        let g = Synth.foldGuard([0.7, 0.2, 0.1], decision: d, equity: 0.45, margin: 0.05)
+        XCTAssertTrue(g.fired)
+        XCTAssertEqual(g.p[0], 0)
+        XCTAssertEqual(g.p[1], 0.9, accuracy: 1e-12)
+        XCTAssertFalse(Synth.foldGuard([0.7, 0.2, 0.1], decision: d, equity: 0.35, margin: 0.05).fired)
+
+        let suite = handsSuite()
+        let a = run("m/a", ["d001": 1, "d002": 0, "d003": 2], probs: ["d001": [0, 0.8, 0.2]])
+        let b = run("m/b", ["d001": 2, "d002": nil, "d003": 2], probs: ["d001": [0, 0.2, 0.8]])
+        let e = try Synth.ensemble([a, b], weights: [1, 3], suite: suite)
+        XCTAssertEqual(e.kind, .derived)
+        XCTAssertEqual(e.results.count, 3)
+        let r1 = e.result(for: "d001")!
+        XCTAssertEqual(r1.actionProbabilities![2], (0.2 + 3 * 0.8) / 4, accuracy: 1e-12)
+        XCTAssertEqual(r1.choice, 2)
+        XCTAssertEqual(e.result(for: "d002")!.choice, 0, "invalid member skipped")
+        XCTAssertTrue(Scoring.summarize(e, suite: suite).hasDistribution)
+
+        let sharp = Synth.temper(a, tau: .infinity, suite: suite)
+        XCTAssertEqual(sharp.result(for: "d001")!.actionProbabilities!, [0, 1, 0])
+        XCTAssertEqual(sharp.derived?.method, "temper")
+        XCTAssertNotEqual(sharp.id, a.id)
+        XCTAssertThrowsError(try Synth.ensemble([a], suite: suite))
+    }
+
+    func testEquityToolsHeuristics() throws {
+        XCTAssertEqual(EquityTools.valueFraction(sizePot: 0.33, isRaise: false), 0.5)
+        XCTAssertEqual(EquityTools.valueFraction(sizePot: 0.75, isRaise: true), 0.2)
+        // River 75% pot with 40% value: bluffs = 30% of the betting range.
+        let b = EquityTools.bluffWeight(sizePot: 0.75, valueFraction: 0.4, river: true)
+        XCTAssertEqual(b * 0.6 / (0.4 + b * 0.6), 0.3, accuracy: 1e-9)
+        let d = makeDecision()
+        let f = try XCTUnwrap(EquityTools.facts(d))
+        XCTAssertTrue((0...1).contains(f.equityPreflop) && (0...1).contains(f.equityNarrowed))
+        XCTAssertLessThan(f.narrowedCombos, f.preflopCombos, "a river bet narrows the range")
+        XCTAssertLessThan(f.equityNarrowed, f.equityPreflop, "AK-high is worse vs a betting range")
+        XCTAssertEqual(EquityTools.facts(d), f, "deterministic / cached")
+    }
+
+    func testSplitSuite() {
+        let suite = handsSuite()
+        let (dev, test) = BenchCLI.splitSuite(suite, devFraction: 0.5, seed: 3)
+        XCTAssertEqual(dev.decisions.count + test.decisions.count, 3)
+        XCTAssertEqual(Set(dev.handIds).intersection(test.handIds), [])
+        XCTAssertEqual(dev.handIds.count, 1)
+        XCTAssertTrue(dev.id.hasSuffix("-dev") && test.id.hasSuffix("-test"))
+    }
+
+    func testTreeBySPR() {
+        XCTAssertNil(HandsTreeConfig.forSPR(17.7).addAllin)
+        XCTAssertEqual(HandsTreeConfig.forSPR(6).addAllin, true)
+        XCTAssertEqual(HandsTreeConfig.forSPR(2).flopBetIP, "33, 75")
+        XCTAssertEqual(SuiteParameters.hands(10, format: .mtt20).scenarios.map(\.format), [.mtt20, .mtt20])
+        XCTAssertEqual(SuiteParameters.hands(10).scenarios.map(\.id), Scenarios.all.map(\.id))
+    }
+
+    /// End-to-end hands generation on a tiny flop game (narrow ranges keep the tree small).
+    func testGenerateHandsTiny() async throws {
+        let tiny = Scenario(id: "btn-bb-srp", name: "tiny", oopName: "BB", ipName: "BTN", rangeOOP: "QQ,JJ,AQs", rangeIP: "AA,KK,AKs,76s",
+                            pot: 5.5, stack: 97.5, summary: "BTN opens 2.5bb, BB calls.")
+        let p = SuiteParameters.hands(4, handsPerSolve: 2, seed: 9, targetExploitability: 1, maxIterations: 60)
+        let suite = try await SuiteGenerator.generateHands(p, scenariosOverride: [tiny])
+        XCTAssertEqual(suite.solves, 2)
+        XCTAssertEqual(suite.handIds.count, 4)
+        XCTAssertEqual(suite.solveRecords?.count, 2)
+        XCTAssertTrue(suite.id.contains("hands4-cash"))
+        for h in suite.handIds {
+            let ds = suite.decisions.filter { $0.handId == h }
+            XCTAssertEqual(ds.map { $0.handSeq! }, Array(0..<ds.count))
+            XCTAssertEqual(ds.first?.street, .flop)
+            XCTAssertEqual(ds.first?.heroSeat, 0, "OOP acts first")
+            XCTAssertEqual(Set(ds.map(\.villainCards)).count, 2, "both seats are recorded with the same two hands")
+            for (a, b) in zip(ds, ds.dropFirst()) {
+                XCTAssertGreaterThanOrEqual(b.history.count, a.history.count + 1)
+                XCTAssertLessThanOrEqual(a.street, b.street)
+                XCTAssertTrue(b.board.starts(with: a.board))
+            }
+            for d in ds {
+                XCTAssertEqual(d.actions.count, d.strategy.count)
+                XCTAssertEqual(d.board.count, d.street.boardCount)
+                XCTAssertTrue(Set(d.heroCardList).isDisjoint(with: d.boardCards))
+            }
+        }
+    }
+
+    // MARK: - Preflop suites
+
+    func testGeneratePreflopPushFold() async throws {
+        let p = SuiteParameters.preflop(40, format: .mtt20, seed: 4)
+        let suite = try await SuiteGenerator.generatePreflop(p, configOverride: .pushFold(stack: 10))
+        XCTAssertEqual(suite.mode, .preflop)
+        XCTAssertTrue(suite.isHands)
+        XCTAssertEqual(suite.handIds.count, 40)
+        XCTAssertTrue(suite.id.contains("preflop40-mtt20"))
+        XCTAssertEqual(suite.solveRecords?.count, 1)
+        for h in suite.handIds {
+            let ds = suite.decisions.filter { $0.handId == h }
+            XCTAssertEqual(ds.first?.heroSeat, 0, "the SB acts first preflop")
+            XCTAssertLessThanOrEqual(ds.count, 2, "push/fold: SB decision, maybe BB response")
+            if ds.count == 2 {
+                XCTAssertEqual(ds[1].heroSeat, 1)
+                XCTAssertEqual(ds[1].history.last?.action?.kind, .allin)
+                XCTAssertEqual(ds[1].actions.map(\.kind), [.fold, .call])
+            }
+            for d in ds {
+                XCTAssertEqual(d.street, .preflop)
+                XCTAssertTrue(d.board.isEmpty)
+                XCTAssertEqual(d.formatId, "mtt20")
+                XCTAssertEqual(d.ante, 1)
+                XCTAssertEqual(d.positions, ["SB", "BB"])
+                XCTAssertEqual(d.actions.count, d.actionEVs.count)
+                XCTAssertEqual(d.strategy.reduce(0, +), 1, accuracy: 0.01)
+            }
+        }
+        let sb = suite.decisions.first { $0.heroSeat == 0 }!
+        XCTAssertEqual(sb.actions.map(\.label), ["Fold", "All-in 10"])
+        XCTAssertTrue(sb.heroIsIP, "the SB is the button: in position postflop")
+
+        // Every variant builds a preflop request without a board; keys are the usual ones.
+        for v in DecisionVariants.all {
+            let text = v.requestBody(sb).prettyText
+            XCTAssertFalse(text.contains(sb.villainCards), "\(v.id) leaks villain cards")
+            XCTAssertTrue(text.contains("allin"), v.id)
+        }
+        let st = DecisionVariants.eq.requestBody(sb).prettyText
+        XCTAssertTrue(st.contains("acts first preflop"))
+        XCTAssertTrue(st.contains("1 bb big-blind ante"))
+        XCTAssertTrue(st.contains("equity_vs_random_hand_pct"))
+        XCTAssertFalse(st.contains("made_hand"))
+
+        // Baselines and per-hand metrics work on preflop suites; seats are named SB / BB.
+        let runs = try await BenchmarkRunner.run(suite: suite, players: [Baseline.bestEV, Baseline.random], persist: false)
+        let rows = Scoring.leaderboard(suite: suite, runs: runs)
+        XCTAssertEqual(rows.first { $0.model == Baseline.bestEV.id }!.perHand!.bbPer100, 0, accuracy: 1e-9)
+        XCTAssertNotNil(rows.first { $0.model == Baseline.random.id }!.perHand!.bySeat["SB"])
+        XCTAssertNotNil(rows.first?.byStreet["preflop"])
+    }
+
+    func testPreflopHeuristics() {
+        // AA is the strongest class, 72o among the weakest.
+        let aa = Combo(Card("As")!, Card("Ah")!).index, sevenTwo = Combo(Card("7s")!, Card("2h")!).index
+        XCTAssertGreaterThan(EquityTools.preflopStrength[aa], 0.84)
+        XCTAssertLessThan(EquityTools.preflopStrength[sevenTwo], 0.36)
+        XCTAssertEqual(DecisionStateBuilder.handClassCode([Card("7s")!, Card("2h")!]), "72o")
+        XCTAssertEqual(DecisionStateBuilder.handClassText([Card("Ks")!, Card("As")!]), "ace-king suited")
+        let h = HistoryEntry(street: .preflop, seat: 0, action: SpotAction(kind: .call, amount: 0.5, to: 1, potFraction: 0, name: "Limp (call 0.5)"), potBefore: 1.5)
+        XCTAssertEqual(h.text(names: ["SB", "BB"]), "SB limps (calls 0.5 bb)")
+        XCTAssertEqual(Street(boardCount: 0), .preflop)
+        XCTAssertEqual(Street.flop.boardCount, 3)
+        XCTAssertEqual(Street.historyStreets(upTo: .turn), [.flop, .turn])
+    }
 }

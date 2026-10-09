@@ -33,6 +33,7 @@ enum Viz {
         case .river: return series1
         case .turn: return series2
         case .flop: return series3
+        case .preflop: return reference
         }
     }
 

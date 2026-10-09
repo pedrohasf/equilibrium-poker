@@ -433,3 +433,55 @@ pre.code .n { color: var(--gold-ink); }
 @media (forced-colors: active) {
   .stack i { forced-color-adjust: none; border: 1px solid CanvasText; }
 }
+
+/* ── View modes ──────────────────────────────────────────── */
+:root[data-mode="simple"] .adv,
+:root:not([data-mode="advanced"]) .adv { display: none !important; }
+:root[data-mode="advanced"] .simple { display: none !important; }
+.mode-switch { display: inline-flex; border: 1px solid var(--hair-2); border-radius: 999px; padding: 2px; background: var(--surface); flex: none; }
+.mode-switch button { all: unset; cursor: pointer; padding: 5px 12px; border-radius: 999px; font: 500 13px/1.2 var(--sans); color: var(--ink-2); }
+.mode-switch button[aria-pressed="true"] { background: var(--gold); color: #1d1606; }
+.mode-switch button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.mode-switch button:not([aria-pressed="true"]):hover { color: var(--ink); background: var(--hair); }
+.topbar nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+@media (max-width: 900px) {
+  .topbar { flex-wrap: wrap; row-gap: 6px; }
+  .topbar nav { order: 3; width: 100%; margin-left: 0; }
+  .mode-switch { margin-left: auto; }
+}
+@media (max-width: 420px) { .topbar nav a:nth-child(2) { display: inline; } .mode-switch button { padding: 5px 9px; } }
+#main { outline: none; }
+
+/* ── Section furniture ───────────────────────────────────── */
+.headline { font-size: clamp(18px, 2vw, 21px); line-height: 1.45; color: var(--ink); margin: 0 0 14px; max-width: 64ch; text-wrap: pretty; }
+.headline strong { color: var(--mint-ink); font-weight: 600; }
+.lede strong { color: var(--ink); font-weight: 600; }
+.sub-h { font: 800 26px/1.05 var(--display); text-transform: uppercase; letter-spacing: .02em; margin: 40px 0 12px; }
+#leaderboard .eyebrow { margin-top: 36px; }
+.chart.big { margin-top: 8px; }
+.facets { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: 18px; }
+.facet.waiting { padding: 18px; border: 1px dashed var(--hair-2); border-radius: var(--radius); color: var(--ink-2); }
+.facet.waiting h3 { font: 600 16px/1.3 var(--sans); margin: 0 0 8px; color: var(--ink); }
+.facet.waiting ul { margin: 0; padding-left: 18px; font-size: 14px; }
+.empty-note { color: var(--muted); font-size: 14px; padding: 18px; border: 1px dashed var(--hair-2); border-radius: var(--radius); margin: 0; }
+.seg-row { display: flex; flex-wrap: wrap; gap: 10px 14px; margin: 0 0 14px; }
+.legend .dash { color: var(--muted); }
+#ar-legend, #lu-legend { margin: 0 0 12px; flex-wrap: wrap; }
+.notes { max-width: 72ch; margin: 0 0 18px; padding: 14px 18px; border-left: 3px solid var(--gold); background: color-mix(in srgb, var(--gold) 6%, transparent); border-radius: 0 10px 10px 0; }
+.notes p { margin: 0 0 8px; } .notes p:last-child { margin: 0; }
+svg .grp { font: 500 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; fill: var(--gold-ink); }
+table.lb.compact { min-width: 760px; }
+.lb tr.star td { background: color-mix(in srgb, var(--mint) 10%, transparent); }
+.lb .good-t { color: var(--good); } .lb .bad-t { color: var(--bad); }
+.pick { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-2); }
+.pick select { font: 500 13px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--hair-2); border-radius: 999px; padding: 5px 10px; max-width: 70vw; }
+
+/* ── Takeaways (simple) ──────────────────────────────────── */
+.takeaways { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; counter-reset: tk; }
+.takeaways li { position: relative; padding: 20px 20px 18px; background: var(--surface); border: 1px solid var(--hair); border-radius: var(--radius); box-shadow: var(--shadow); }
+.takeaways li::before { content: ""; position: absolute; left: 20px; top: 0; width: 34px; height: 3px; background: var(--gold); border-radius: 0 0 3px 3px; }
+.takeaways h3 { font: 800 22px/1.05 var(--display); text-transform: uppercase; letter-spacing: .02em; margin: 6px 0 8px; }
+.takeaways p { margin: 0 0 10px; color: var(--ink-2); font-size: 15px; }
+.takeaways a { font-size: 13px; }
+.method-extra { margin-top: 12px; padding-top: 28px; border-top: 1px solid var(--hair); }
+.facets { align-items: start; }

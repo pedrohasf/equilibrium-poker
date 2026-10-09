@@ -9,7 +9,8 @@ public struct DecisionScore: Hashable, Sendable {
     public var evLoss: Double
     /// `evLoss` as a fraction of the pot at the decision.
     public var evLossPot: Double
-    /// 1 − loss / (best − worst), in [0, 1]. Decisions where every action has the same EV score 1.
+    /// 1 − loss / (best − worst), in [0, 1]. Decisions where every action is within `Scoring.bestTolerance`
+    /// of the pot of the best score 1 for any valid answer.
     public var score: Double
     /// Within `Scoring.bestTolerance` of the best EV.
     public var isBest: Bool
@@ -80,11 +81,16 @@ public struct ModelScore: Codable, Hashable, Sendable, Identifiable {
     public var totalCost: Double
     public var promptTokens: Int
     public var completionTokens: Int
+    /// Variant id (decision models) — also part of `label`.
+    public var variant: String? = nil
+    /// Hands suites: postflop bb/100 lost vs GTO (see `HandMetrics`).
+    public var perHand: HandMetrics? = nil
 
     public var isComplete: Bool { answered >= total }
     public var totalTokens: Int { promptTokens + completionTokens }
     public var isBaseline: Bool { kind == .baseline }
     public var isDecisionModel: Bool { kind == .decisionModel }
+    public var isDerived: Bool { kind == .derived }
     public var hasDistribution: Bool { overall.distributionN > 0 }
 }
 
@@ -148,7 +154,7 @@ public enum Scoring {
     /// Scores one stored result. Old sampled-GTO runs (no stored probabilities) use the hand's strategy.
     public static func score(_ d: Decision, result r: DecisionResult, run: BenchmarkRun) -> DecisionScore {
         let probs = r.actionProbabilities ?? (run.model == Baseline.gto.id ? d.strategy : nil)
-        return score(d, choice: r.choice, probabilities: probs, probabilistic: run.kind == .decisionModel, confidence: r.confidence)
+        return score(d, choice: r.choice, probabilities: probs, probabilistic: run.kind.isProbabilistic, confidence: r.confidence)
     }
 
     public static func score(_ d: Decision, choice: Int?) -> DecisionScore {
@@ -157,7 +163,9 @@ public enum Scoring {
         let loss = d.evLoss(c)
         let pot = max(d.pot, 1e-9)
         let spread = d.evSpread
-        let s = spread > 1e-9 ? max(0, min(1, 1 - loss / spread)) : 1
+        // Decisions whose actions are all within the tie tolerance score 1 for any valid action (hands suites keep
+        // such near-trivial spots; their spread is solver noise). Invalid answers still score 0.
+        let s = spread > bestTolerance * pot ? max(0, min(1, 1 - loss / spread)) : (valid ? 1 : 0)
         let freq = c.map { d.strategy.indices.contains($0) ? d.strategy[$0] : 0 } ?? 0
         return DecisionScore(decisionId: d.id, choice: c, valid: valid, evLoss: loss, evLossPot: loss / pot, score: s,
                              isBest: valid && loss <= bestTolerance * pot, approved: valid && freq >= approvedFrequency,
@@ -226,12 +234,15 @@ public enum Scoring {
             byType[type] = bucket(group.map(\.1))
         }
         let latencies = results.map(\.latency)
-        return ModelScore(id: run.id, model: run.model, label: run.label, kind: run.kind, answered: pairs.count,
-                          total: suite.decisions.count, overall: bucket(pairs.map(\.1)), byStreet: byStreet, byType: byType,
-                          meanLatency: latencies.isEmpty ? 0 : latencies.reduce(0, +) / Double(latencies.count),
-                          totalCost: results.reduce(0) { $0 + $1.cost },
-                          promptTokens: results.reduce(0) { $0 + $1.promptTokens },
-                          completionTokens: results.reduce(0) { $0 + $1.completionTokens })
+        var row = ModelScore(id: run.id, model: run.model, label: run.label, kind: run.kind, answered: pairs.count,
+                             total: suite.decisions.count, overall: bucket(pairs.map(\.1)), byStreet: byStreet, byType: byType,
+                             meanLatency: latencies.isEmpty ? 0 : latencies.reduce(0, +) / Double(latencies.count),
+                             totalCost: results.reduce(0) { $0 + $1.cost },
+                             promptTokens: results.reduce(0) { $0 + $1.promptTokens },
+                             completionTokens: results.reduce(0) { $0 + $1.completionTokens })
+        row.variant = run.variantId
+        if suite.isHands { row.perHand = handMetrics(pairs, suite: suite) }
+        return row
     }
 
     /// Rows sorted by GTO score (desc), then EV loss (asc).
@@ -243,5 +254,129 @@ public enum Scoring {
                 if abs($0.overall.gtoScore - $1.overall.gtoScore) > 1e-9 { return $0.overall.gtoScore > $1.overall.gtoScore }
                 return $0.overall.meanEVLossPot < $1.overall.meanEVLossPot
             }
+    }
+}
+
+// MARK: - Per-hand metrics (hands suites)
+
+/// Postflop **bb/100 lost vs GTO** for hands suites.
+///
+/// Definition. In a hands suite every decision of both players in a dealt hand is recorded, and
+/// the benchmarked player answers all of them as the hero — i.e. it plays *both seats* of every
+/// hand. For hand h let L_h = Σ_{decisions d in h} loss_d (bb; invalid answers lose the full EV
+/// spread, as everywhere). Each hand therefore contains two seat-hands (the model in the OOP seat
+/// and in the IP seat), and
+///
+///     bb/100 lost = 100 · mean_h(L_h / 2)
+///
+/// = expected big blinds lost per 100 hands *played in one seat*, averaged over both seats — the
+/// unit a poker player would quote. The 95% CI treats hands as the sampling unit (decisions in a
+/// hand are correlated, so they are clustered by hand): X_h = 100 · L_h / 2, normal approximation.
+/// `mixed` uses Σ p(a)·loss(a) instead of the argmax loss (players with probabilities).
+///
+/// Caveat: losses are one-step deviations along the GTO-sampled line — each decision's loss
+/// assumes GTO play continues afterwards, and the line does not branch on the model's choice. It
+/// is the standard first-order EV-loss measure, not the result of a full match. Only hands whose
+/// decisions were all answered are counted (`hands` ≤ suite hands for partial runs).
+public struct HandMetrics: Codable, Hashable, Sendable {
+    public var hands: Int
+    public var bbPer100: Double
+    public var bbPer100CI: Double
+    public var mixedBbPer100: Double?
+    public var mixedBbPer100CI: Double?
+    /// Per-seat split (bb/100 lost in that seat, 100 · mean_h L_{h,seat}); "OOP" / "IP" (preflop suites: "SB" / "BB").
+    public var bySeat: [String: Double]
+
+    public init(hands: Int, bbPer100: Double, bbPer100CI: Double, mixedBbPer100: Double? = nil, mixedBbPer100CI: Double? = nil,
+                bySeat: [String: Double] = [:]) {
+        self.hands = hands
+        self.bbPer100 = bbPer100
+        self.bbPer100CI = bbPer100CI
+        self.mixedBbPer100 = mixedBbPer100
+        self.mixedBbPer100CI = mixedBbPer100CI
+        self.bySeat = bySeat
+    }
+}
+
+extension Scoring {
+    /// Per-hand sums (bb) of argmax and mixed loss over completely answered hands, keyed by hand id.
+    /// `mixed` is nil for hands containing a decision without distribution metrics.
+    public static func handLosses(_ pairs: [(Decision, DecisionScore)], suite: BenchmarkSuite)
+        -> [String: (loss: Double, mixed: Double?, seat: [Double])] {
+        let perHand = Dictionary(grouping: suite.decisions.filter { $0.handId != nil }, by: { $0.handId! }).mapValues(\.count)
+        var acc: [String: (loss: Double, mixed: Double?, seat: [Double], n: Int)] = [:]
+        for (d, s) in pairs {
+            guard let h = d.handId else { continue }
+            var a = acc[h] ?? (0, 0, [0, 0], 0)
+            a.loss += s.evLoss
+            a.mixed = a.mixed.flatMap { m in s.mixedEVLoss.map { m + $0 } }
+            a.seat[d.heroSeat] += s.evLoss
+            a.n += 1
+            acc[h] = a
+        }
+        return acc.filter { perHand[$0.key] == $0.value.n }.mapValues { ($0.loss, $0.mixed, $0.seat) }
+    }
+
+    public static func handMetrics(_ pairs: [(Decision, DecisionScore)], suite: BenchmarkSuite) -> HandMetrics? {
+        let hands = handLosses(pairs, suite: suite)
+        guard !hands.isEmpty else { return nil }
+        let order = hands.keys.sorted()
+        let x = meanCI(order.map { 100 * hands[$0]!.loss / 2 })
+        var m = HandMetrics(hands: hands.count, bbPer100: x.mean, bbPer100CI: x.ci)
+        let mixed = order.compactMap { hands[$0]!.mixed }
+        if mixed.count == order.count {
+            let mx = meanCI(mixed.map { 100 * $0 / 2 })
+            m.mixedBbPer100 = mx.mean
+            m.mixedBbPer100CI = mx.ci
+        }
+        let n = Double(hands.count)
+        let seatNames = suite.mode == .preflop ? ["SB", "BB"] : ["OOP", "IP"]
+        m.bySeat = [seatNames[0]: 100 * hands.values.reduce(0) { $0 + $1.seat[0] } / n,
+                    seatNames[1]: 100 * hands.values.reduce(0) { $0 + $1.seat[1] } / n]
+        return m
+    }
+
+    // MARK: Paired comparison
+
+    /// Mean difference (a − b) with a 95% CI.
+    public struct Diff: Codable, Hashable, Sendable {
+        public var n: Int
+        public var mean: Double
+        public var ci: Double
+        /// |mean| > ci.
+        public var significant: Bool { n > 1 && abs(mean) > ci }
+    }
+
+    /// Paired difference between two runs on the decisions both answered: GTO score, EV loss % pot and
+    /// mixed loss % pot are paired over decisions; bb/100 (hands suites) is paired over complete hands.
+    public struct PairedComparison: Sendable {
+        public var score: Diff
+        public var lossPot: Diff
+        public var mixedPot: Diff?
+        public var bbPer100: Diff?
+        public var mixedBbPer100: Diff?
+    }
+
+    public static func paired(_ a: BenchmarkRun, _ b: BenchmarkRun, suite: BenchmarkSuite) -> PairedComparison {
+        let sa = Dictionary(scores(a, suite: suite).map { ($0.0.id, $0) }, uniquingKeysWith: { x, _ in x })
+        let sb = Dictionary(scores(b, suite: suite).map { ($0.0.id, $0) }, uniquingKeysWith: { x, _ in x })
+        let common = suite.decisions.map(\.id).filter { sa[$0] != nil && sb[$0] != nil }
+        func diff(_ xs: [Double]) -> Diff { let m = meanCI(xs); return Diff(n: xs.count, mean: m.mean, ci: m.ci) }
+        let score = diff(common.map { (sa[$0]!.1.score - sb[$0]!.1.score) * 100 })
+        let loss = diff(common.map { sa[$0]!.1.evLossPot - sb[$0]!.1.evLossPot })
+        let mixedIds = common.filter { sa[$0]!.1.mixedEVLossPot != nil && sb[$0]!.1.mixedEVLossPot != nil }
+        var out = PairedComparison(score: score, lossPot: loss,
+                                   mixedPot: mixedIds.isEmpty ? nil : diff(mixedIds.map { sa[$0]!.1.mixedEVLossPot! - sb[$0]!.1.mixedEVLossPot! }))
+        if suite.isHands {
+            let ha = handLosses(common.map { sa[$0]! }, suite: suite)
+            let hb = handLosses(common.map { sb[$0]! }, suite: suite)
+            let hands = ha.keys.filter { hb[$0] != nil }.sorted()
+            if !hands.isEmpty {
+                out.bbPer100 = diff(hands.map { 100 * (ha[$0]!.loss - hb[$0]!.loss) / 2 })
+                let mh = hands.filter { ha[$0]!.mixed != nil && hb[$0]!.mixed != nil }
+                if !mh.isEmpty { out.mixedBbPer100 = diff(mh.map { 100 * (ha[$0]!.mixed! - hb[$0]!.mixed!) / 2 }) }
+            }
+        }
+        return out
     }
 }

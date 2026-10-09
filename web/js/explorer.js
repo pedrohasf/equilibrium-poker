@@ -1,24 +1,39 @@
 // Spot explorer: filterable list of decisions + a table view of the selected spot.
+// Works for any exported suite (spot suite, full-hand and preflop suites); `load(data, key)` swaps the suite.
 import { esc, fmt, cardHTML, cardBackHTML, miniCardHTML, cardsText, actionColors, bindTips, ttRows, lossStatus, statusHTML } from "./util.js";
 
-export function createExplorer(data, root) {
-  const { players, decisions, suite } = data;
-  const tol = suite.scoring?.bestTolerancePot ?? 0.0025;
-  const blunderAt = suite.scoring?.blunderThresholdPot ?? 0.25;
-  const dmIdx = players.map((p, i) => (p.kind === "decisionModel" ? i : -1)).filter((i) => i >= 0);
-  const scenarios = Object.fromEntries((suite.scenarios ?? []).map((s) => [s.id, s]));
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-  // Per-decision summary over decision models.
-  const info = new Map(decisions.map((d) => {
-    const ans = dmIdx.map((i) => d.answers[i]).filter(Boolean);
-    const picks = new Set(ans.filter((a) => a[0] >= 0).map((a) => a[0]));
-    return [d.id, {
-      answered: ans.length,
-      split: picks.size > 1,
-      blunder: ans.some((a) => a[0] < 0 || a[1] > blunderAt),
-      nBest: ans.filter((a) => a[0] >= 0 && a[1] <= tol).length,
-    }];
-  }));
+export function createExplorer(root, { onSelect } = {}) {
+  let data = null, players = [], decisions = [], suite = null, suiteKey = "spots";
+  let tol = 0.0025, blunderAt = 0.25, scenarios = {}, info = new Map();
+
+  function setData(d, key) {
+    data = d; suiteKey = key;
+    ({ players, decisions, suite } = d);
+    tol = suite.scoring?.bestTolerancePot ?? 0.0025;
+    blunderAt = suite.scoring?.blunderThresholdPot ?? 0.25;
+    scenarios = Object.fromEntries((suite.scenarios ?? []).map((s) => [s.id, s]));
+    const dmIdx = players.map((p, i) => (p.kind !== "baseline" ? i : -1)).filter((i) => i >= 0);
+    info = new Map(decisions.map((d) => {
+      const ans = dmIdx.map((i) => d.answers[i]).filter(Boolean);
+      const picks = new Set(ans.filter((a) => a[0] >= 0).map((a) => a[0]));
+      return [d.id, {
+        answered: ans.length,
+        split: picks.size > 1,
+        blunder: ans.some((a) => a[0] < 0 || a[1] > blunderAt),
+        nBest: ans.filter((a) => a[0] >= 0 && a[1] <= tol).length,
+      }];
+    }));
+    // Street filter from the streets present in this suite.
+    const streets = ["preflop", "flop", "turn", "river"].filter((st) => decisions.some((d) => d.street === st));
+    const seg = root.querySelector('.seg[data-filter="street"]');
+    seg.innerHTML = [["all", "All streets"], ...streets.map((st) => [st, cap(st)])].map(([v, t], i) =>
+      `<button type="button" role="radio" aria-checked="${i === 0}" data-v="${v}">${t}</button>`).join("");
+    seg.hidden = streets.length < 2;
+    filters.street = "all";
+    current = null;
+  }
 
   const filters = { street: "all", type: "all", split: false, blunder: false };
   let list = [];
@@ -37,7 +52,7 @@ export function createExplorer(data, root) {
         && (!filters.split || i.split)
         && (!filters.blunder || i.blunder);
     });
-    countEl.textContent = `${list.length} of ${decisions.length} spots`;
+    countEl.textContent = `${list.length} of ${decisions.length} decisions`;
     if (!list.length) {
       listEl.innerHTML = `<li class="empty">No spot matches these filters. Clear a filter to see more.</li>`;
       return;
@@ -47,8 +62,8 @@ export function createExplorer(data, root) {
       const hero = d.positions[d.heroSeat];
       return `<li><button type="button" data-id="${d.id}" aria-current="${d.id === current}" aria-label="${esc(`${d.id}, ${d.street}, ${hero} ${d.type === "facingBet" ? "facing a bet" : "to act"}, ${i.nBest} of ${i.answered} models found the best action`)}">` +
         `<span class="id">${d.id}</span><span class="mini">${d.hero.map(miniCardHTML).join("")}</span>` +
-        `<span class="meta"><span>${d.street === "river" ? "River" : "Turn"} · ${esc(hero)} ${d.type === "facingBet" ? "faces bet" : "to act"}</span>` +
-        `<span class="agree" title="Decision models that found a best-EV action">${i.nBest}/${i.answered}</span></span></button></li>`;
+        `<span class="meta"><span>${d.hand ? `${esc(d.hand)} · ` : ""}${cap(d.street)} · ${esc(hero)} ${d.type === "facingBet" ? "faces bet" : "to act"}</span>` +
+        `<span class="agree" title="Models that found a best-EV action">${i.nBest}/${i.answered}</span></span></button></li>`;
     }).join("");
   }
 
@@ -65,7 +80,9 @@ export function createExplorer(data, root) {
       if (focusList) btn.focus({ preventScroll: true });
     }
     renderSpot(d);
-    if (push && location.hash !== `#${id}`) history.replaceState(null, "", `#${id}`);
+    const h = suiteKey === "spots" ? `#${id}` : `#${suiteKey}/${id}`;
+    if (push && location.hash !== h) history.replaceState(null, "", h);
+    onSelect?.(suiteKey, id);
   }
 
   function step(delta) {
@@ -87,7 +104,7 @@ export function createExplorer(data, root) {
     const seat = (s, isHero) => {
       const cards = isHero ? d.hero.map((c) => cardHTML(c, "lg")).join("")
         : revealed ? d.villain.map((c) => cardHTML(c)).join("") : cardBackHTML() + cardBackHTML();
-      const who = `<div class="who">${esc(d.positions[s])}${isHero ? " · hero" : ""}<small>${fmt.bb(d.stacks[s])} bb behind · ${s === 1 ? "in position" : "out of position"}</small>` +
+      const who = `<div class="who">${esc(d.positions[s])}${isHero ? " · hero" : ""}<small>${fmt.bb(d.stacks[s])} bb behind${d.street === "preflop" ? "" : ` · ${s === 1 ? "in position" : "out of position"}`}</small>` +
         (isHero ? "" : `<button type="button" class="reveal" data-act="reveal">${revealed ? "hide hand" : "reveal hand"}</button>`) + `</div>`;
       return `<div class="seat ${isHero ? "is-hero" : "is-villain"}">${isHero ? cards + who : who + cards}</div>`;
     };
@@ -118,7 +135,7 @@ export function createExplorer(data, root) {
 
     // Answers.
     const rows = players.map((p, k) => ({ p, a: d.answers[k] })).filter((r) => r.a && r.p.baseline !== "bestEV")
-      .sort((x, y) => (x.p.kind === y.p.kind ? 0 : x.p.kind === "decisionModel" ? -1 : 1) || ((x.a[0] < 0) - (y.a[0] < 0)) || x.a[1] - y.a[1] || (x.a[4] ?? 1) - (y.a[4] ?? 1));
+      .sort((x, y) => ((x.p.kind === "baseline") - (y.p.kind === "baseline")) || ((x.a[0] < 0) - (y.a[0] < 0)) || x.a[1] - y.a[1] || (x.a[4] ?? 1) - (y.a[4] ?? 1));
     const ansHTML = rows.map(({ p, a }) => {
       const [choice, lossPot, probs, conf] = a;
       const valid = choice >= 0;
@@ -132,10 +149,10 @@ export function createExplorer(data, root) {
         `<span class="res"><span class="lbl">${esc(pick)}</span>${statusHTML(st)}</span></div>`;
     }).join("");
     const answers = `<section class="panel"><h4>What the players chose · ${i.nBest} of ${i.answered} models found a best-EV action</h4><div class="answers">${ansHTML || `<p class="footnote">No answers for this spot yet.</p>`}</div>` +
-      `<p class="footnote" style="margin:10px 0 0">Bars show each model's returned probabilities over the actions; the label is its pick. Hover for confidence and latency. Reference bots in gold.</p></section>`;
+      `<p class="footnote" style="margin:10px 0 0">Bars show each model's returned probabilities over the actions; the label is its pick. Hover for confidence and latency. Reference bots in gold${players.some((p) => p.borrowedFrom) ? " (borrowed from the parent suite)" : ""}.</p></section>`;
 
     const idx = list.findIndex((x) => x.id === d.id);
-    spotEl.innerHTML = `<header class="spot-head"><h3>${d.id}</h3><span class="sub">${d.street === "river" ? "River" : "Turn"} · ${esc(sc?.name ?? d.scenario)} · ${esc(d.preflop)}</span>` +
+    spotEl.innerHTML = `<header class="spot-head"><h3>${d.id}</h3><span class="sub">${cap(d.street)} · ${esc(sc?.name ?? d.scenario)}${d.hand ? ` · hand ${esc(d.hand)}` : ""} · ${esc(d.preflop)}</span>` +
       `<span class="nav"><button type="button" class="btn" data-act="prev" ${idx <= 0 ? "disabled" : ""} aria-label="Previous spot">← Prev</button><button type="button" class="btn" data-act="next" ${idx < 0 || idx >= list.length - 1 ? "disabled" : ""} aria-label="Next spot">Next →</button></span></header>` +
       `<div class="spot-grid"><div>${table}${hist}</div><div>${solver}${answers}</div></div>`;
     spotEl._d = d;
@@ -173,6 +190,7 @@ export function createExplorer(data, root) {
   }
   document.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || /input|textarea|select/i.test(e.target.tagName)) return;
+    if (!data || !root.offsetParent) return;
     const r = root.getBoundingClientRect();
     if (r.bottom < 0 || r.top > innerHeight) return;
     if (e.key === "j" || e.key === "J") { step(1); e.preventDefault(); }
@@ -180,7 +198,7 @@ export function createExplorer(data, root) {
   });
   bindTips(root, (key) => {
     const d = spotEl._d;
-    if (!d) return "";
+    if (!d || !data) return "";
     const [kind, a, b] = key.split(":");
     if (kind === "gto") return `<b>${esc(d.actions[a].l)}</b>${ttRows([["GTO frequency", fmt.pct(d.gto[a], 1)], ["EV", `${d.ev[a].toFixed(2)} bb`]])}`;
     if (kind === "p") {
@@ -209,11 +227,14 @@ export function createExplorer(data, root) {
     else if (current) select(current, { push: false });
   }
 
-  apply();
   return {
+    load(d, key) { setData(d, key); apply(); },
     open(id) {
+      if (!data) return;
       const target = decisions.some((d) => d.id === id) ? id : list[0]?.id;
       if (target) select(target, { push: false });
     },
+    get key() { return suiteKey; },
+    get data() { return data; },
   };
 }

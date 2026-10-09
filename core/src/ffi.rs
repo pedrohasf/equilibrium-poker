@@ -193,3 +193,82 @@ pub unsafe extern "C" fn gto_equity(req: *const c_char) -> *mut c_char {
         Ok(json!({ "ok": true, "equity": eq }))
     })
 }
+
+// ------------------------------------------------------------------ preflop
+
+pub struct PreflopHandle {
+    solver: Mutex<crate::preflop::PreflopSolver>,
+    stop: AtomicBool,
+}
+
+/// Creates a heads-up preflop solver (see `preflop::PreflopConfig`). Null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn gto_preflop_create(config_json: *const c_char, error_out: *mut *mut c_char) -> *mut PreflopHandle {
+    let res = catch_unwind(AssertUnwindSafe(|| -> Result<crate::preflop::PreflopSolver, String> {
+        let cfg: crate::preflop::PreflopConfig = serde_json::from_str(input(config_json)?).map_err(|e| e.to_string())?;
+        crate::preflop::PreflopSolver::new(cfg)
+    }));
+    match res {
+        Ok(Ok(s)) => Box::into_raw(Box::new(PreflopHandle { solver: Mutex::new(s), stop: AtomicBool::new(false) })),
+        Ok(Err(e)) => {
+            if !error_out.is_null() {
+                *error_out = err(e);
+            }
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            if !error_out.is_null() {
+                *error_out = err("internal solver panic");
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gto_preflop_free(h: *mut PreflopHandle) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
+    }
+}
+
+/// Exploitability in the progress callback / result is in milli-big-blinds per hand.
+#[no_mangle]
+pub unsafe extern "C" fn gto_preflop_solve(
+    h: *const PreflopHandle,
+    max_iterations: u32,
+    target_mbb: f32,
+    check_every: u32,
+    callback: ProgressCallback,
+    ctx: *mut c_void,
+) -> *mut c_char {
+    guarded(|| {
+        let h = h.as_ref().ok_or("null solver")?;
+        h.stop.store(false, Ordering::SeqCst);
+        let mut s = h.solver.lock().map_err(|_| "poisoned")?;
+        let p = s.solve(max_iterations, target_mbb, check_every, &h.stop, |p| {
+            if let Some(cb) = callback {
+                cb(ctx, p.iteration, p.exploitability, p.elapsed);
+            }
+        });
+        Ok(json!({ "ok": true, "progress": p, "nodes": s.nodes }))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gto_preflop_stop(h: *const PreflopHandle) {
+    if let Some(h) = h.as_ref() {
+        h.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// `path_json`: array of action indices. Returns the same node shape as `gto_solver_query`.
+#[no_mangle]
+pub unsafe extern "C" fn gto_preflop_query(h: *const PreflopHandle, path_json: *const c_char) -> *mut c_char {
+    guarded(|| {
+        let h = h.as_ref().ok_or("null solver")?;
+        let path: Vec<usize> = serde_json::from_str(input(path_json)?).map_err(|e| e.to_string())?;
+        let s = h.solver.lock().map_err(|_| "poisoned")?;
+        Ok(json!({ "ok": true, "node": s.query(&path)? }))
+    })
+}

@@ -1,7 +1,9 @@
-// Entry point: one fetch of data/results.json, then render every section.
-import { esc, fmt } from "./util.js";
+// Entry point: loads data/bench.json (+ arena.json, notes.json) once and renders every section.
+// Simple mode needs nothing else; the explorer lazy-loads per-suite decision files in advanced mode.
+import { esc, fmt, isAdvanced } from "./util.js";
 import { renderCharts, renderRail, whiskerSVG } from "./charts.js";
 import { createExplorer } from "./explorer.js";
+import { nameBook, renderFormats, renderArena, renderLuna, renderSpotSimple, heroSimple, renderTakeaways, methodSimple, methodAdvanced } from "./sections.js";
 
 const $ = (s) => document.querySelector(s);
 
@@ -14,53 +16,109 @@ $(".theme-toggle").addEventListener("click", () => {
   try { localStorage.setItem("eq-theme", next); } catch {}
 });
 
+// View mode: simple (default) / advanced. Persisted, and linkable with ?mode=advanced.
+function setMode(mode, { persist = true } = {}) {
+  document.documentElement.dataset.mode = mode;
+  for (const b of document.querySelectorAll(".mode-switch button")) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+  if (persist) { try { localStorage.setItem("eq-mode", mode); } catch {} }
+  const u = new URL(location.href);
+  if (mode === "advanced") u.searchParams.set("mode", "advanced"); else u.searchParams.delete("mode");
+  history.replaceState(null, "", u.pathname + u.search + u.hash);
+  document.dispatchEvent(new CustomEvent("eq:mode", { detail: mode }));
+}
+for (const b of document.querySelectorAll(".mode-switch button")) {
+  b.setAttribute("aria-pressed", String(b.dataset.mode === document.documentElement.dataset.mode));
+  b.addEventListener("click", () => setMode(b.dataset.mode));
+}
+
+async function getJSON(url, optional = false) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`${url} returned HTTP ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    if (optional) return null;
+    throw e;
+  }
+}
+
 async function load() {
-  const res = await fetch("data/results.json");
-  if (!res.ok) throw new Error(`data/results.json returned HTTP ${res.status}`);
-  return res.json();
+  const [bench, arena, notes] = await Promise.all([getJSON("data/bench.json", true), getJSON("data/arena.json", true), getJSON("data/notes.json", true)]);
+  // Older exports: only results.json (the spot suite with decisions).
+  const spot = bench?.spot ?? (bench ? null : await getJSON("data/results.json", true));
+  if (!bench && !spot) throw new Error("data/bench.json (or data/results.json) not found");
+  return { bench, arena, notes, spot };
 }
 
 const DM = (p) => p.kind === "decisionModel";
 
-function hero(data) {
-  const { players, suite } = data;
+function spotVerdict(data) {
+  const { players } = data;
   const dms = players.filter(DM).sort((a, b) => b.overall.score - a.overall.score);
   const base = Object.fromEntries(players.filter((p) => !DM(p)).map((p) => [p.baseline, p]));
-  const streets = Object.entries(suite.streets).map(([k, v]) => `${v} ${k}`).join(" · ");
-  $("#hero-eyebrow").textContent = `Heads-up no-limit hold'em · ${suite.decisions} solved spots · ${streets}`;
-
   const top = dms[0];
+  if (!top) return "No decision-model runs on the spot suite yet — only the reference bots.";
   const cs = base.callingStation?.overall.score, rnd = base.random?.overall.score, gto = base.gto?.overall.score;
-  if (top) {
-    const aboveCS = cs != null ? dms.filter((p) => p.overall.score > cs).length : null;
-    const belowRandom = rnd != null ? dms.filter((p) => p.overall.score < rnd).length : 0;
-    let v = `The best decision model, <strong>${esc(top.name)}</strong>, keeps <strong>${top.overall.score.toFixed(1)}</strong> of 100 points of available EV`;
-    v += gto != null ? `; a bot sampling the solver's own strategy keeps <span class="gold">${gto.toFixed(1)}</span>.` : ".";
-    if (aboveCS != null) {
-      v += ` ${aboveCS === dms.length ? "Every" : `${aboveCS} of ${dms.length}`} model${aboveCS === 1 && aboveCS !== dms.length ? "" : "s"} beat${aboveCS === 1 && aboveCS !== dms.length ? "s" : ""} a calling station that never folds or raises (<span class="gold">${cs.toFixed(1)}</span>)`;
-      v += belowRandom ? `, and ${belowRandom} score${belowRandom === 1 ? "s" : ""} below picking at random.` : ".";
-    }
-    $("#verdict").innerHTML = v;
-  } else {
-    $("#verdict").textContent = "No decision-model runs in this export yet — only the reference bots.";
+  const aboveCS = cs != null ? dms.filter((p) => p.overall.score > cs).length : null;
+  const belowRandom = rnd != null ? dms.filter((p) => p.overall.score < rnd).length : 0;
+  let v = `The best decision model, <strong>${esc(top.name)}</strong>, keeps <strong>${top.overall.score.toFixed(1)}</strong> of 100 points of available EV`;
+  v += gto != null ? `; a bot sampling the solver's own strategy keeps <span class="gold">${gto.toFixed(1)}</span>.` : ".";
+  if (aboveCS != null) {
+    v += ` ${aboveCS === dms.length ? "Every" : `${aboveCS} of ${dms.length}`} model${aboveCS === 1 && aboveCS !== dms.length ? "" : "s"} beat${aboveCS === 1 && aboveCS !== dms.length ? "s" : ""} a calling station that never folds or raises (<span class="gold">${cs.toFixed(1)}</span>)`;
+    v += belowRandom ? `, and ${belowRandom} score${belowRandom === 1 ? "s" : ""} below picking at random.` : ".";
   }
+  return v;
+}
 
-  const answers = dms.reduce((s, p) => s + p.answered, 0);
-  const cost = dms.reduce((s, p) => s + (p.cost?.total ?? 0), 0);
+function hero(ctx) {
+  const { spot, bench, arena, book } = ctx;
+  const simple = heroSimple(ctx);
+  const adv = spot ? spotVerdict(spot) : simple;
+  $("#verdict").innerHTML = `<span class="simple">${simple ?? adv ?? "No results exported yet."}</span><span class="adv">${adv ?? simple ?? "No results exported yet."}</span>`;
+
+  // Totals across every part.
+  const models = new Set();
+  let answers = 0, cost = 0;
+  for (const p of spot?.players ?? []) if (DM(p)) { models.add(p.model); answers += p.answered; cost += p.cost?.total ?? 0; }
+  for (const s of bench?.suites ?? []) for (const p of s.players) {
+    if (p.kind !== "decisionModel") continue;
+    models.add(p.model); answers += p.answered; cost += p.cost ?? 0;
+  }
+  let arenaHands = 0;
+  for (const m of arena?.matches ?? []) if (!m.reference) arenaHands += m.hands;
+  for (const p of arena?.pairs ?? []) if (p.player.startsWith("dm:")) { models.add(arena.players.find((x) => x.id === p.player)?.model); cost += p.cost ?? 0; }
+  models.delete(undefined);
   const stats = [
-    [suite.decisions, "solved spots"],
-    [dms.length, "decision models"],
-    [fmt.int(answers), "answers scored"],
-    [fmt.usd(cost), "total API cost"],
-  ];
-  $("#hero-stats").innerHTML = stats.map(([v, l]) => `<div><dt>${esc(l)}</dt><dd>${esc(v)}</dd></div>`).join("");
+    [models.size, "AI models tested", "decision models"],
+    [fmt.int(answers), "decisions judged", "decision-model answers scored"],
+    arenaHands ? [fmt.int(arenaHands), "arena hands played", "arena hands (decision models)"] : null,
+    [fmt.usd(cost), "spent on API calls", "total API cost"],
+  ].filter(Boolean);
+  $("#hero-stats").innerHTML = stats.map(([v, s, a]) => `<div><dt><span class="simple">${esc(s)}</span><span class="adv">${esc(a)}</span></dt><dd>${esc(v)}</dd></div>`).join("");
 
+  $("#rail-cap").innerHTML = `<span class="simple">Spot test score, 0–100: how much of the best possible value each model keeps per decision. Chips are AI models; gold posts are simple bots for scale.</span>` +
+    `<span class="adv">GTO score, 0–100, on the spot suite: the share of the available EV each player keeps per decision. Posts mark the reference bots; chips are decision models.</span>`;
+
+  const dms = spot?.players.filter(DM) ?? [];
   const partial = dms.filter((p) => !p.complete);
   if (partial.length) {
     const n = Math.round(partial.reduce((s, p) => s + p.answered, 0) / partial.length);
     const n_ = $("#notice");
     n_.hidden = false;
-    n_.innerHTML = `<strong>Run in progress.</strong> ${partial.length} of ${dms.length} decision models have answered about ${n} of ${suite.decisions} spots so far; hollow dots mark them in the charts and their numbers will move.`;
+    n_.innerHTML = `<strong>Run in progress.</strong> ${partial.length} of ${dms.length} decision models have answered about ${n} of ${spot.suite.decisions} spots so far; hollow dots mark them in the charts and their numbers will move.`;
+  }
+}
+
+function spotHead(spot) {
+  if (!spot) { $("#spot-bench").hidden = true; return; }
+  const dms = spot.players.filter(DM).sort((a, b) => b.overall.score - a.overall.score);
+  const base = Object.fromEntries(spot.players.filter((p) => !DM(p)).map((p) => [p.baseline, p]));
+  $("#sb-eyebrow").textContent = `Part 1 · ${spot.suite.decisions} solved spots`;
+  const top = dms[0];
+  if (top) {
+    $("#sb-headline").innerHTML = `<span class="simple">Best: <strong>${esc(top.name)}</strong>, ${top.overall.score.toFixed(0)} points out of 100` +
+      (base.gto ? ` — a perfect-play bot scores ${base.gto.overall.score.toFixed(0)}` : "") + (base.random ? `, random clicking ${base.random.overall.score.toFixed(0)}.` : ".") + `</span>` +
+      `<span class="adv">${spotVerdict(spot)}</span>`;
   }
 }
 
@@ -154,10 +212,10 @@ function method(data) {
   const scen = s.scenarios.map((x) => `<li><strong>${esc(x.name)}</strong> — ${esc(x.summary)} Pot ${fmt.bb(x.pot)} bb, ${fmt.bb(x.stack)} bb behind. <span class="dash">${x.count} spots</span></li>`).join("");
   const sizes = sv.betSizes.map((b) => `${b.root}: ${esc(b.sizes)}`).join("; ");
   const ex = s.exampleState;
-  $("#method-eyebrow").textContent = `Suite ${s.id} · generated ${fmt.date(s.createdAt)}`;
+  $("#method-eyebrow").innerHTML = `<span class="simple">How the numbers are made</span><span class="adv">Spot suite ${esc(s.id)} · generated ${fmt.date(s.createdAt)}</span>`;
   $("#method-body").innerHTML = `
     <div>
-      <h3>The spots</h3>
+      <h3>The spot test (Part 1)</h3>
       <p>${s.decisions} decisions were sampled from ${s.solves} solved heads-up subgames (seed ${esc(s.seed)}). Each subgame starts on the ${sv.rootStreets.join(" or ")} of a standard 100 bb preflop scenario:</p>
       <ul>${scen}</ul>
       <p>For each subgame, concrete hands are dealt from both ranges and the tree is walked following the solver's own strategy until a random decision point. The player to act there is the hero; spots where every action is worth about the same (within ${fmt.pct(sv.minEVSpreadPot, 0)} of the pot) are skipped as trivial.</p>
@@ -196,34 +254,56 @@ function method(data) {
     </div>
     ${ex ? `<div class="full"><details class="state"><summary>Example request for ${esc(ex.decision)} — the exact state and question a model receives</summary><pre class="code"><code>${highlightJSON(ex.body)}</code></pre></details></div>` : ""}
   `;
-  $("#footer-meta").innerHTML = `Suite <code>${esc(s.id)}</code> · data exported ${fmt.date(data.generatedAt)} · <a href="data/results.json">results.json</a> · <a href="https://openrouter.ai/models?output_modalities=decisions" target="_blank" rel="noopener">OpenRouter decision models</a>`;
+
 }
 
 // ── Routing & lazy explorer ───────────────────────────────
-function setupExplorer(data) {
+function setupExplorer(ctx) {
+  const { bench, spot } = ctx;
+  const sources = [];
+  if (spot) sources.push({ key: "spots", label: `Spot suite · ${spot.suite.decisions} spots`, file: "data/results.json" });
+  for (const s of bench?.suites ?? []) if (s.file) sources.push({ key: s.key, label: `${s.format.short} ${s.mode === "preflop" ? "preflop" : "hands"}${s.split ? ` · ${s.split}` : ""} · ${s.decisions} decisions`, file: `data/${s.file}` });
+  const sel = $("#ex-suite");
+  if (!sources.length) { $("#explorer").hidden = true; return; }
+  sel.innerHTML = sources.map((s) => `<option value="${esc(s.key)}">${esc(s.label)}</option>`).join("");
+  sel.closest("label").hidden = sources.length < 2;
+  const cache = {};
   let ex = null;
-  const ensure = () => (ex ??= createExplorer(data, $("#explorer")));
+  const ensure = () => (ex ??= createExplorer($("#ex-root")));
+  async function show(key, id) {
+    const src = sources.find((s) => s.key === key) ?? sources[0];
+    sel.value = src.key;
+    $("#ex-list").setAttribute("aria-busy", "true");
+    try {
+      cache[src.key] ??= await (await fetch(src.file)).json();
+    } catch (e) {
+      $("#ex-spot").innerHTML = `<p class="empty-note">Could not load ${esc(src.file)} (${esc(e.message)}).</p>`;
+      return;
+    } finally { $("#ex-list").removeAttribute("aria-busy"); }
+    const e = ensure();
+    if (e.key !== src.key || !e.data) e.load(cache[src.key], src.key);
+    e.open(id ?? defaultSpot(cache[src.key]));
+  }
+  sel.addEventListener("change", () => show(sel.value));
   const fromHash = () => {
-    const m = /^#(d\d{2,4})$/i.exec(location.hash);
-    if (!m) return false;
-    ensure().open(m[1].toLowerCase());
-    $("#spots").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    const m = /^#(?:([\w-]+)\/)?(d\d{2,4})?$/i.exec(location.hash);
+    if (!m || (!m[2] && !m[1]) || !sources.some((s) => s.key === (m[1] ?? "spots"))) return false;
+    if (!isAdvanced()) setMode("advanced", { persist: false });
+    show(m[1] ?? "spots", m[2]?.toLowerCase());
+    requestAnimationFrame(() => $("#explorer").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }));
     return true;
   };
   window.addEventListener("hashchange", fromHash);
   if (fromHash()) return;
   const io = new IntersectionObserver((entries) => {
-    if (entries.some((e) => e.isIntersecting)) {
-      io.disconnect();
-      if (!ex) ensure().open(defaultSpot(data));
-    }
+    if (entries.some((e) => e.isIntersecting) && !ex) { io.disconnect(); show(sources[0].key); }
   }, { rootMargin: "600px 0px" });
-  io.observe($("#spots"));
+  io.observe($("#explorer"));
 }
 
-/** Open on a spot where the decision models split — the interesting ones. */
+/** Open on a decision where the models split — the interesting ones. */
 function defaultSpot(data) {
-  const dmIdx = data.players.map((p, i) => (DM(p) ? i : -1)).filter((i) => i >= 0);
+  const dmIdx = data.players.map((p, i) => (p.kind !== "baseline" ? i : -1)).filter((i) => i >= 0);
   let best = data.decisions[0]?.id, bestScore = -1;
   for (const d of data.decisions) {
     const picks = dmIdx.map((i) => d.answers[i]).filter((a) => a && a[0] >= 0).map((a) => a[0]);
@@ -236,15 +316,37 @@ function defaultSpot(data) {
   return best;
 }
 
+function footer(ctx) {
+  const { bench, arena, spot } = ctx;
+  const when = bench?.generatedAt ?? spot?.generatedAt;
+  const files = [bench && `<a href="data/bench.json">bench.json</a>`, spot && `<a href="data/results.json">results.json</a>`, arena && `<a href="data/arena.json">arena.json</a>`].filter(Boolean).join(" · ");
+  $("#footer-meta").innerHTML = `Data exported ${fmt.date(when)} · ${files} · <a href="https://openrouter.ai/models?output_modalities=decisions" target="_blank" rel="noopener">OpenRouter decision models</a>`;
+}
+
 try {
-  const data = await load();
-  hero(data);
-  renderRail(data, $("#rail-plot"));
-  leaderboard(data);
-  renderCharts(data, $("#charts"));
-  method(data);
-  setupExplorer(data);
+  const ctx = await load();
+  ctx.book = nameBook(ctx.bench, ctx.spot);
+  hero(ctx);
+  renderTakeaways(ctx);
+  if (ctx.spot) {
+    renderRail(ctx.spot, $("#rail-plot"));
+    spotHead(ctx.spot);
+    renderSpotSimple(ctx.spot);
+    leaderboard(ctx.spot);
+    renderCharts(ctx.spot, $("#charts"));
+    method(ctx.spot);
+  } else {
+    $("#rail").hidden = true;
+    spotHead(null);
+  }
+  renderFormats(ctx.bench, ctx.notes);
+  renderArena(ctx.arena, ctx.book, ctx.notes);
+  renderLuna(ctx.bench, ctx.notes);
+  methodSimple(ctx);
+  methodAdvanced(ctx);
+  footer(ctx);
+  setupExplorer(ctx);
 } catch (err) {
   console.error(err);
-  $("#verdict").innerHTML = `Could not load <code>data/results.json</code> (${esc(err.message)}). Serve this folder over HTTP — for example <code>python3 -m http.server</code> inside <code>web/</code> — and check that the file exists (<code>eqbench bench export</code> writes it).`;
+  $("#verdict").innerHTML = `Could not load the results (${esc(err.message)}). Serve this folder over HTTP — for example <code>python3 -m http.server</code> inside <code>web/</code> — and check that <code>data/bench.json</code> exists (<code>eqbench bench export --all</code> writes it).`;
 }

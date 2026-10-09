@@ -89,10 +89,10 @@ pub struct Game {
 }
 
 #[derive(Clone, Copy)]
-struct Discount {
-    pos: f32,
-    neg: f32,
-    strat: f32,
+pub(crate) struct Discount {
+    pub(crate) pos: f32,
+    pub(crate) neg: f32,
+    pub(crate) strat: f32,
 }
 
 /// Depth up to which sibling action subtrees are solved in parallel.
@@ -635,7 +635,7 @@ impl Game {
 /// DCFR (alpha = 1.5, beta = 0.5, gamma = 3) for 0-based iteration `i`.
 /// The average strategy is restarted at every power of 4 so that poor early
 /// iterates stop polluting it.
-fn discount_params(i: u32) -> Discount {
+pub(crate) fn discount_params(i: u32) -> Discount {
     let nearest_pow4 = if i == 0 { 0 } else { 1u32 << ((31 - i.leading_zeros()) & !1) };
     let ta = (i as f64 - 1.0).max(0.0);
     let pa = ta * ta.sqrt();

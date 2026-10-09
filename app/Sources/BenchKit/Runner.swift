@@ -177,9 +177,10 @@ public enum BenchmarkRunner {
         let decisions = Array(suite.decisions.prefix(limit ?? suite.decisions.count))
         var recorders: [RunRecorder] = []
         for p in players {
-            let id = BenchmarkRun.makeId(suiteId: suite.id, model: p.id)
+            let id = BenchmarkRun.makeId(suiteId: suite.id, model: p.id, variant: p.variant)
             var run = (resume ? BenchStore.loadRun(id: id) : nil)
-                ?? BenchmarkRun(suiteId: suite.id, model: p.id, displayName: p.displayName, kind: p.kind)
+                ?? BenchmarkRun(suiteId: suite.id, model: p.id, displayName: p.displayName, kind: p.kind, variant: p.variant)
+            if run.kind == .decisionModel && run.variant == nil { run.variant = p.variant ?? DecisionVariants.defaultId }
             if !resume { run.results = [] }
             let rec = RunRecorder(run: run, suite: suite, persist: persist)
             recorders.append(rec)

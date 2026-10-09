@@ -42,7 +42,8 @@ public enum BenchExport {
     // MARK: Document
 
     public static func document(suite: BenchmarkSuite, runs allRuns: [BenchmarkRun],
-                                catalog: [String: CatalogEntry] = [:], generatedAt: Date = Date()) -> EJ {
+                                catalog: [String: CatalogEntry] = [:], generatedAt: Date = Date(),
+                                borrowed: Set<String> = []) -> EJ {
         let runs = allRuns.filter { $0.suiteId == suite.id && !$0.results.isEmpty }
         let rows = Scoring.leaderboard(suite: suite, runs: runs)
         let runById = Dictionary(runs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -50,17 +51,14 @@ public enum BenchExport {
         var usedKeys = Set<String>()
         let players: [(key: String, row: ModelScore, run: BenchmarkRun)] = rows.compactMap { row in
             guard let run = runById[row.id] else { return nil }
-            var base = Baseline(id: run.model).map(\.rawValue)
-                ?? String(run.model.split(separator: "/").last ?? Substring(run.model))
-            base = base.lowercased().map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." ? $0 : "-" }.reduce(into: "") { $0.append($1) }
-            var key = base
-            var n = 2
-            while usedKeys.contains(key) { key = "\(base)-\(n)"; n += 1 }
-            usedKeys.insert(key)
-            return (key, row, run)
+            return (playerKey(run, used: &usedKeys), row, run)
         }
 
-        let playerObjs = players.map { p in player(key: p.key, row: p.row, run: p.run, suite: suite, catalog: catalog) }
+        let playerObjs = players.map { p -> EJ in
+            let o = player(key: p.key, row: p.row, run: p.run, suite: suite, catalog: catalog)
+            guard borrowed.contains(p.run.id), case .o(let kv) = o else { return o }
+            return .o(kv + [("borrowedFrom", .s(FormatPool.split(suite.id).root))])
+        }
 
         // Per-decision answers, aligned with `players`.
         let resultMaps = players.map { p in Dictionary(p.run.results.map { ($0.decisionId, $0) }, uniquingKeysWith: { _, b in b }) }
@@ -75,15 +73,39 @@ public enum BenchExport {
         let p = suite.parameters
         let exps = suite.decisions.map(\.exploitability)
         let scenarioCounts = suite.countByScenario
-        let scenarios: [EJ] = p.scenarios.filter { scenarioCounts[$0.id] != nil }.map { s in
+        let scenarios: [EJ] = (p.scenarios + Scenarios.every).reduce(into: [Scenario]()) { a, s in if !a.contains(where: { $0.id == s.id }) { a.append(s) } }.filter { scenarioCounts[$0.id] != nil }.map { s in
             .o([("id", .s(s.id)), ("name", .s(s.name)), ("summary", .s(s.summary)), ("oop", .s(s.oopName)), ("ip", .s(s.ipName)),
                 ("pot", .n(s.pot, 2)), ("stack", .n(s.stack, 2)), ("count", .i(scenarioCounts[s.id] ?? 0))])
         }
-        let betSizes: [EJ] = p.streets.sorted().map { st in
-            let (_, raiseLimit) = SuiteGenerator.betSizes(root: st)
-            let desc = st == .flop ? "standard sizes (one 33% bet, one raise)" : "bets 33% and 75% pot, raise 60%"
-            return .o([("root", .s(st.rawValue)), ("sizes", .s(desc)), ("raiseLimit", .i(raiseLimit))])
-        }
+        let trees: [String] = p.handsTree.map { [$0.summary] }
+            ?? Array(Set((suite.solveRecords ?? []).compactMap(\.tree))).sorted()
+        let treeText = trees.isEmpty ? HandsTreeConfig.standard.summary : trees.joined(separator: " | ")
+        let betSizes: [EJ] = suite.isHands
+            ? trees.map { t in .o([("root", .s("flop")), ("sizes", .s(t)), ("raiseLimit", .i(p.handsTree?.raiseLimit ?? 1))]) }
+            : p.streets.sorted().map { st in
+                let (_, raiseLimit) = SuiteGenerator.betSizes(root: st)
+                let desc = st == .flop ? "standard sizes (one 33% bet, one raise)" : "bets 33% and 75% pot, raise 60%"
+                return .o([("root", .s(st.rawValue)), ("sizes", .s(desc)), ("raiseLimit", .i(raiseLimit))])
+            }
+        let approximations: [EJ] = suite.mode == .preflop ? [
+            .s("Heads-up preflop only (blind vs blind; Spin & Go heads-up), solved by the core's preflop CFR: push/fold at ≤ 12bb, min-raise trees at ≤ 30bb, 2.5x opens deeper (limps, one iso size, one 3-bet and 4-bet size, all-in)."),
+            .s("Flop terminals of the deeper preflop trees are valued with an equity-realisation model (all-in equity scaled by position and SPR, see core/src/preflop.rs) instead of a postflop solve, so preflop EVs are approximate."),
+            .s("Preflop bb/100 is reported separately from postflop (hands) suites; hands do not continue to the flop."),
+            .s("No triviality filter: easy folds/raises are kept (see spreadPot). Chip EV only; ICM is not modelled."),
+        ] : suite.isHands ? [
+            .s("Each solve is a full flop game from the scenario's preflop ranges; hands are dealt from those ranges and played to the end following GTO, recording every decision of both players, so turn and river ranges are correctly narrowed."),
+            .s("The flop tree is deliberately lean and depends on stack depth (\(treeText)), so the equilibrium is for that abstraction."),
+            .s("Solves stop near \(String(format: "%.2g", p.targetExploitability))% of the flop pot; EV differences below ~0.25% of the pot are treated as ties."),
+            .s(suite.format == .cash ? "Cash game, 100bb." : "\(suite.format.title): chip EV only — tournament payouts (ICM) are not modelled."),
+            .s(p.minEVSpread > 0 ? "Decisions whose action EVs are within \(BB.pct(p.minEVSpread)) of the pot were skipped." : "No triviality filter: near-trivial decisions are kept (see spreadPot), as in real play."),
+            .s("EV loss is measured against a GTO opponent along GTO-sampled lines (one-step deviations), not in a full match."),
+        ] : [
+            .s("Turn and river subgames start from the scenario's preflop ranges; the synthetic flop/turn line that sets pot and stacks does not narrow them."),
+            .s("Bet trees are deliberately lean (two bet sizes, one raise size, limited raises), so the equilibrium is for that abstraction."),
+            .s("Solves stop near the target exploitability, so EV differences below ~0.25% of the pot are treated as ties."),
+            .s("Spots where every action is within \(BB.pct(p.minEVSpread)) of the pot of each other are skipped as trivial."),
+            .s("EV loss is measured against a GTO opponent, not against the leaks of a real one."),
+        ]
         let example = suite.decisions.first { $0.facingBet && $0.actions.count >= 3 } ?? suite.decisions.first
         let exampleState: EJ = example.map { d in
             .o([("decision", .s(d.id)), ("approxInputTokens", .i(DecisionStateBuilder.estimatedInputTokens(d))),
@@ -95,6 +117,9 @@ public enum BenchExport {
             ("name", .s(suite.name)),
             ("createdAt", .s(iso(suite.createdAt))),
             ("decisions", .i(suite.decisions.count)),
+            ("mode", .s(suite.mode.rawValue)),
+            ("format", .o([("id", .s(suite.format.rawValue)), ("title", .s(suite.format.title)), ("summary", .s(suite.format.summary))])),
+            ("hands", suite.isHands ? .i(suite.handIds.count) : .null),
             ("solves", .i(suite.solves)),
             ("generationSeconds", .n(suite.generationSeconds, 1)),
             ("seed", .s(String(p.seed))),
@@ -112,20 +137,21 @@ public enum BenchExport {
                 ("maxExploitabilityPctPot", .n(exps.max() ?? 0, 3)),
                 ("minEVSpreadPot", .n(p.minEVSpread, 3)),
                 ("decisionsPerSolve", .i(p.decisionsPerSolve)),
+                ("handsPerSolve", p.handsPerSolve.map { .i($0) } ?? .null),
+                ("solveSeconds", .opt(suite.solveRecords.map { r in r.map(\.solveSeconds).reduce(0, +) / Double(max(1, r.count)) }, 1)),
+                ("solveRecords", suite.solveRecords.map { recs in .a(recs.map { r in
+                    .o([("scenario", .s(r.scenarioId)), ("board", .s(r.board)), ("spr", .opt(r.spr, 2)), ("expl", .n(r.exploitability, 3)), ("it", .i(r.iterations)),
+                        ("solveS", .n(r.solveSeconds, 1)), ("sampleS", .n(r.sampleSeconds, 1)), ("hands", .i(r.hands)), ("decisions", .i(r.decisions))])
+                }) } ?? .null),
             ])),
-            ("approximations", .a([
-                .s("Turn and river subgames start from the scenario's preflop ranges; the synthetic flop/turn line that sets pot and stacks does not narrow them."),
-                .s("Bet trees are deliberately lean (two bet sizes, one raise size, limited raises), so the equilibrium is for that abstraction."),
-                .s("Solves stop near the target exploitability, so EV differences below ~0.25% of the pot are treated as ties."),
-                .s("Spots where every action is within \(BB.pct(p.minEVSpread)) of the pot of each other are skipped as trivial."),
-                .s("EV loss is measured against a GTO opponent, not against the leaks of a real one."),
-            ])),
+            ("approximations", .a(approximations)),
             ("scoring", .o([
                 ("bestTolerancePot", .n(Scoring.bestTolerance, 4)),
                 ("approvedFrequency", .n(Scoring.approvedFrequency, 2)),
                 ("blunderThresholdPot", .n(Scoring.blunderThreshold, 2)),
             ])),
             ("stateVersion", .i(DecisionStateBuilder.version)),
+            ("variants", .a(DecisionVariants.all.map { v in .o([("id", .s(v.id)), ("summary", .s(v.summary))]) })),
             ("exampleState", exampleState),
         ])
 
@@ -140,6 +166,36 @@ public enum BenchExport {
     }
 
     // MARK: Pieces
+
+    /// Short, unique, URL-safe key for a run ("jev-1.13", "gpt-6-luna-decisions-eq", "callingstation").
+    static func playerKey(_ run: BenchmarkRun, used: inout Set<String>) -> String {
+        var base = Baseline(id: run.model).map(\.rawValue)
+            ?? String(run.model.split(separator: "/").last ?? Substring(run.model))
+        if run.kind == .decisionModel, let v = run.variantId, v != DecisionVariants.defaultId { base += "-\(v)" }
+        if run.kind == .derived { base = String(run.model.dropFirst("derived:".count)) }
+        base = base.lowercased().map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." ? $0 : "-" }.reduce(into: "") { $0.append($1) }
+        var key = base
+        var n = 2
+        while used.contains(key) { key = "\(base)-\(n)"; n += 1 }
+        used.insert(key)
+        return key
+    }
+
+    /// Friendly model name without variant ("GPT-6 Luna Decisions"), for decision models, baselines and derived runs.
+    public static func modelName(_ model: String, catalog: [String: CatalogEntry] = [:]) -> String {
+        if let b = Baseline(id: model) { return b.displayName }
+        if let k = knownNames[model] { return k }
+        if let c = catalog[model]?.name { return c.contains(": ") ? String(c.split(separator: ":", maxSplits: 1)[1]).trimmingCharacters(in: .whitespaces) : c }
+        return model
+    }
+
+    /// Display name of a run: model name plus " [variant]" for non-default variants; derived runs keep their own name.
+    public static func displayName(_ run: BenchmarkRun, catalog: [String: CatalogEntry] = [:]) -> String {
+        if run.kind == .derived { return run.displayName }
+        var name = modelName(run.model, catalog: catalog)
+        if run.kind == .decisionModel, let v = run.variantId, v != DecisionVariants.defaultId { name += " [\(v)]" }
+        return name
+    }
 
     static func bucket(_ b: ScoreBucket) -> EJ {
         var f: [(String, EJ)] = [
@@ -175,11 +231,7 @@ public enum BenchExport {
             resolved = resolved ?? (obj["model"] as? String)
             if servedBy != nil && resolved != nil { break }
         }
-        let name: String
-        if let b = baseline { name = b.displayName }
-        else if let k = knownNames[run.model] { name = k }
-        else if let c = catalog[run.model]?.name { name = c.contains(": ") ? String(c.split(separator: ":", maxSplits: 1)[1]).trimmingCharacters(in: .whitespaces) : c }
-        else { name = run.model }
+        let name = displayName(run, catalog: catalog)
 
         let lat = results.filter(\.isValid).map(\.latency).filter { $0 > 0 }.sorted()
         func q(_ p: Double) -> Double { lat.isEmpty ? 0 : lat[min(lat.count - 1, Int((Double(lat.count - 1) * p).rounded()))] }
@@ -196,11 +248,25 @@ public enum BenchExport {
         ]
         if let b = baseline {
             f += [("baseline", .s(b.rawValue)), ("summary", .s(b.summary))]
+        } else if run.kind == .derived {
+            f += [("summary", .s(run.derived?.description ?? ""))]
         } else {
             f += [("provider", .s(knownProviders[providerSlug] ?? servedBy ?? providerSlug))]
             if let servedBy { f.append(("servedBy", .s(servedBy))) }
             if let resolved { f.append(("resolvedModel", .s(resolved))) }
             f += [("url", .s("https://openrouter.ai/\(run.model)"))]
+        }
+        if let v = run.variantId, run.kind == .decisionModel {
+            f += [("variant", .s(v)), ("label", .s(run.label))]
+        }
+        if let dv = run.derived {
+            f += [("derived", .o([("method", .s(dv.method)), ("sources", .a(dv.sources.map { .s($0) })), ("description", .s(dv.description)),
+                                  ("hybrid", .b(dv.hybrid))]))]
+        }
+        if let h = row.perHand {
+            f += [("perHand", .o([("hands", .i(h.hands)), ("bbPer100", .n(h.bbPer100, 2)), ("bbPer100CI", .n(h.bbPer100CI, 2)),
+                                  ("mixedBbPer100", .opt(h.mixedBbPer100, 2)), ("mixedBbPer100CI", .opt(h.mixedBbPer100CI, 2)),
+                                  ("bySeat", .o(h.bySeat.keys.sorted().map { ($0, EJ.n(h.bySeat[$0]!, 2)) }))]))]
         }
         f += [
             ("answered", .i(row.answered)),
@@ -210,6 +276,9 @@ public enum BenchExport {
             ("byStreet", .o(Street.allCases.compactMap { s in row.byStreet[s.rawValue].map { (s.rawValue, bucket($0)) } })),
             ("byType", .o(DecisionType.allCases.compactMap { t in row.byType[t.rawValue].map { (t.rawValue, bucket($0)) } })),
         ]
+        if run.kind == .derived {
+            f += [("cost", .o([("total", .n(row.totalCost, 6)), ("per1k", .n(row.totalCost / Double(answered) * 1000, 4))]))]
+        }
         if run.kind == .decisionModel {
             f += [
                 ("latency", .o([("mean", .n(row.meanLatency, 3)), ("median", .n(q(0.5), 3)), ("p90", .n(q(0.9), 3))])),
@@ -236,15 +305,16 @@ public enum BenchExport {
     static func decision(_ d: Decision, answers: [EJ]) -> EJ {
         // Street-by-street history (cards dealt, pot at start, actions with seat).
         var streets: [EJ] = []
-        for street in Street.allCases where street <= d.street {
+        for street in Street.historyStreets(upTo: d.street) {
             let cards: [String]
             switch street {
+            case .preflop: cards = []
             case .flop: cards = Array(d.board.prefix(3))
             case .turn: cards = d.board.count > 3 ? [d.board[3]] : []
             case .river: cards = d.board.count > 4 ? [d.board[4]] : []
             }
             let entries = d.history.filter { $0.street == street && $0.action != nil }
-            let potStart = street == .flop ? d.flopPot
+            let potStart = street <= .flop ? d.flopPot
                 : (d.history.first { $0.street == street }?.potBefore ?? entries.first?.potBefore ?? d.pot)
             let acts: [EJ] = entries.map { e in
                 .o([("seat", .i(e.seat ?? 0)), ("t", .s(e.text(names: d.positions))), ("k", .s(e.action?.kind.rawValue ?? "")),
@@ -280,6 +350,8 @@ public enum BenchExport {
             ("ev", .a(d.actionEVs.map { .n($0, 3) })),
             ("best", .i(d.bestAction)),
             ("spreadPot", .n(d.evSpread / max(d.pot, 1e-9), 4)),
+            ("hand", d.handId.map { .s($0) } ?? .null),
+            ("handSeq", d.handSeq.map { .i($0) } ?? .null),
             ("answers", .a(answers)),
         ])
     }

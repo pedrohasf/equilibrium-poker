@@ -2,7 +2,8 @@ import Foundation
 import OpenRouterKit
 import SolverKit
 
-/// Builds the `state` + `choice` question sent to OpenRouter System One decision models.
+/// Builds the `state` + `choice` question sent to OpenRouter System One decision models — the `v2`
+/// presentation. Other presentations live in `DecisionVariants` and reuse these pieces.
 ///
 /// Decision models read a state and answer typed questions; they never see the question id and
 /// are better with semantic facts than arithmetic, so the state spells out cards, positions,
@@ -67,6 +68,7 @@ public enum DecisionStateBuilder {
 
     /// Self-contained description of one legal action (what it does, its size, and when it is right).
     static func describe(_ a: SpotAction, _ d: Decision) -> String {
+        if d.street == .preflop { return describePreflop(a, d) }
         let pot = d.pot
         let heroStack = d.stacks[d.heroSeat]
         let pct = BB.pct(a.potFraction)
@@ -118,6 +120,7 @@ public enum DecisionStateBuilder {
     static func num(_ x: Double, _ places: Double = 100) -> JSONValue { .number((x * places).rounded() / places) }
 
     public static func state(_ d: Decision) -> JSONValue {
+        if d.street == .preflop { return preflopState(d) }
         let hero = d.heroPosition, villain = d.villainPosition
         let names = [d.positions[0] + (d.heroSeat == 0 ? " (hero)" : " (villain)"),
                      d.positions[1] + (d.heroSeat == 1 ? " (hero)" : " (villain)")]
@@ -126,15 +129,16 @@ public enum DecisionStateBuilder {
 
         // Betting so far, street by street.
         var streets: [JSONValue] = []
-        for street in Street.allCases where street <= d.street {
+        for street in Street.historyStreets(upTo: d.street) {
             let cards: [String]
             switch street {
+            case .preflop: cards = []
             case .flop: cards = Array(d.board.prefix(3))
             case .turn: cards = d.board.count > 3 ? [d.board[3]] : []
             case .river: cards = d.board.count > 4 ? [d.board[4]] : []
             }
             let entries = d.history.filter { $0.street == street && $0.action != nil }
-            let potStart = street == .flop ? d.flopPot
+            let potStart = street <= .flop ? d.flopPot
                 : (d.history.first { $0.street == street }?.potBefore ?? entries.first?.potBefore ?? d.pot)
             var acts = entries.map { JSONValue.string($0.text(names: names)) }
             if street == d.street { acts.append(.string("\(names[d.heroSeat]) to act")) }
@@ -190,7 +194,7 @@ public enum DecisionStateBuilder {
         return [
             "game": [
                 "variant": "No-Limit Texas Hold'em, heads-up postflop",
-                "setup": "6-max positions, everyone else folded preflop; 100 bb starting stacks",
+                "setup": .string(setupText(d)),
                 "units": "all amounts in big blinds (bb); pot includes every chip committed, including a bet being faced",
                 "card_notation": "rank + suit: A K Q J T(10) 9-2; s spades, h hearts, d diamonds, c clubs",
             ],
@@ -214,7 +218,132 @@ public enum DecisionStateBuilder {
         ]
     }
 
-    /// The exact request body (minus auth) sent to `/api/alpha/decisions`, for display and the CLI.
+    /// Table/format description: cash "6-max … 100 bb", tournaments/spins from `GameFormat` (chip EV).
+    static func setupText(_ d: Decision) -> String {
+        let f = d.format
+        if f == .cash { return "6-max positions, everyone else folded preflop; 100 bb starting stacks" }
+        return "\(f.title): \(f.summary) Everyone else folded preflop; stacks as shown."
+    }
+
+    // MARK: Preflop
+
+    /// "pocket aces", "ace-king suited", "seven-two offsuit".
+    public static func handClassText(_ cards: [Card]) -> String {
+        guard cards.count == 2 else { return "unknown" }
+        let (hi, lo) = cards[0].rank >= cards[1].rank ? (cards[0], cards[1]) : (cards[1], cards[0])
+        if hi.rank == lo.rank { return "pocket \(HandFacts.plural[hi.rank.rawValue])" }
+        return "\(rankNames[hi.rank.rawValue].lowercased())-\(rankNames[lo.rank.rawValue].lowercased()) \(hi.suit == lo.suit ? "suited" : "offsuit")"
+    }
+
+    /// "AKs", "72o", "TT".
+    public static func handClassCode(_ cards: [Card]) -> String {
+        guard cards.count == 2 else { return "" }
+        let (hi, lo) = cards[0].rank >= cards[1].rank ? (cards[0], cards[1]) : (cards[1], cards[0])
+        return "\(hi.rank.char)\(lo.rank.char)" + (hi.rank == lo.rank ? "" : hi.suit == lo.suit ? "s" : "o")
+    }
+
+    static func describePreflop(_ a: SpotAction, _ d: Decision) -> String {
+        let heroStack = d.stacks[d.heroSeat]
+        switch a.kind {
+        case .fold:
+            return "Fold: the hero gives up the hand and the chips already posted; the villain wins the \(BB.fmt(d.pot)) bb pot."
+                + (d.toCall > 0 ? " Right with hands too weak to continue for \(BB.fmt(d.toCall)) bb (calling needs about \(BB.pct(potOdds(d))) equity before position effects)." : "")
+        case .check:
+            return "Check: the BB takes the free flop after the SB limped; the pot stays \(BB.fmt(d.pot)) bb. Right with hands that do not gain from raising."
+        case .call:
+            if a.name?.hasPrefix("Limp") == true {
+                return "Limp: complete the small blind (0.5 bb more) to see a flop in a \(BB.fmt(d.pot + a.amount)) bb pot; the BB may check or raise. "
+                    + "Right with hands that play well in small pots but gain little from raising."
+            }
+            let allIn = a.amount >= heroStack - 1e-6
+            return "Call \(BB.fmt(a.amount)) bb: the hero matches the villain's raise, making the pot \(BB.fmt(d.pot + a.amount)) bb. It needs at least "
+                + "\(BB.pct(potOdds(d))) equity against the villain's range to break even" + (allIn
+                    ? "; the hero is all-in and the hand goes to showdown."
+                    : " (less in position, more out of position, since equity is not fully realised); the flop is dealt next.")
+        case .bet, .raise:
+            return "Raise to \(BB.fmt(a.to)) bb: the hero puts in \(BB.fmt(a.amount)) bb more (pot becomes \(BB.fmt(d.pot + a.amount)) bb, "
+                + "\(BB.fmt(max(0, heroStack - a.amount))) bb behind); the villain may fold, call or re-raise. Right with hands that are ahead of the "
+                + "villain's continuing range, or as a bluff with hands that block strong holdings and play poorly when called."
+        case .allin:
+            return "All-in for \(BB.fmt(a.to)) bb total (\(BB.fmt(a.amount)) bb more): the villain can only call or fold. Right with strong hands, "
+                + "or with hands that profit from the villain's folds plus their equity when called."
+        }
+    }
+
+    /// Preflop state: no board; blinds, ante, seats (the SB is the button), preflop history and pot odds.
+    static func preflopState(_ d: Decision) -> JSONValue {
+        let names = [d.positions[0] + (d.heroSeat == 0 ? " (hero)" : " (villain)"),
+                     d.positions[1] + (d.heroSeat == 1 ? " (hero)" : " (villain)")]
+        let hero = Card.parseList(d.heroCards) ?? []
+        var acts = d.history.filter { $0.action != nil }.map { JSONValue.string($0.text(names: names)) }
+        acts.append(.string("\(names[d.heroSeat]) to act"))
+        let ante = d.ante ?? 0
+        var spot: [String: JSONValue] = [
+            "street": "preflop",
+            "pot_bb": num(d.pot),
+            "hero_stack_bb": num(d.stacks[d.heroSeat]),
+            "villain_stack_bb": num(d.stacks[1 - d.heroSeat]),
+            "effective_stack_bb": num(effectiveStack(d)),
+            "facing_raise": .bool(d.history.contains { $0.seat == 1 - d.heroSeat && ($0.action?.kind.isAggressive ?? false) }),
+            "amount_to_call_bb": num(d.toCall),
+        ]
+        if d.facingBet {
+            spot["pot_odds"] = .string("call \(BB.fmt(d.toCall)) bb to win a \(BB.fmt(d.pot)) bb pot")
+            spot["equity_needed_to_call_pct"] = num(potOdds(d) * 100, 10)
+        }
+        let keys = actionKeys(d.actions)
+        let legal: [JSONValue] = d.actions.enumerated().map { i, a in
+            var o: [String: JSONValue] = ["key": .string(keys[i]), "label": .string(a.label), "type": .string(a.kind.rawValue)]
+            if a.kind != .fold && a.kind != .check {
+                o["chips_added_bb"] = num(a.amount)
+                o["total_bet_bb"] = num(a.to)
+                o["pot_after_bb"] = num(d.pot + a.amount)
+            }
+            return .object(o)
+        }
+        let heroRole = d.heroSeat == 0 ? "small blind and button: acts first preflop, last (in position) on every later street"
+            : "big blind: acts last preflop, first (out of position) on every later street"
+        return [
+            "game": [
+                "variant": "No-Limit Texas Hold'em, heads-up preflop (blind vs blind)",
+                "setup": .string(setupText(d)),
+                "seats": "SB is the button: acts first preflop, last postflop. BB acts last preflop, first postflop.",
+                "blinds": .string("SB 0.5 bb, BB 1 bb" + (ante > 0 ? ", plus a \(BB.fmt(ante)) bb big-blind ante (dead money in the pot)" : ", no ante")),
+                "units": "all amounts in big blinds (bb); pot includes the blinds, antes and every chip committed, including a raise being faced",
+                "card_notation": "rank + suit: A K Q J T(10) 9-2; s spades, h hearts, d diamonds, c clubs",
+            ],
+            "preflop": .string(d.preflopSummary),
+            "hero": [
+                "position": .string(d.heroPosition),
+                "role": .string(heroRole),
+                "in_position_postflop": .bool(d.heroIsIP),
+                "hole_cards": .string(hero.map(\.description).joined(separator: " ")),
+                "hole_cards_spelled": .string(hero.map(spell).joined(separator: " and ")),
+                "hand": .string(handClassText(hero) + " (\(handClassCode(hero)))"),
+                "stack_bb": num(d.stacks[d.heroSeat]),
+            ],
+            "villain": [
+                "position": .string(d.villainPosition),
+                "stack_bb": num(d.stacks[1 - d.heroSeat]),
+                "hole_cards": "unknown",
+                "style": "strong, balanced (GTO) player",
+            ],
+            "betting": [
+                "street": "preflop",
+                "pot_at_start_bb": num(d.flopPot),
+                "actions": .array(acts),
+            ],
+            "spot": .object(spot),
+            "legal_actions": .array(legal),
+        ]
+    }
+
+    /// The exact request body (minus auth) sent to `/api/alpha/decisions` for `variant`.
+    public static func requestBody(_ d: Decision, model: String = "<decision-model>", variant: DecisionVariant) -> JSONValue {
+        variant.requestBody(d, model: model)
+    }
+
+    /// The exact request body (minus auth) sent to `/api/alpha/decisions` (v2), for display and the CLI.
     public static func requestBody(_ d: Decision, model: String = "<decision-model>") -> JSONValue {
         let crit = criteria(d).mapValues { JSONValue.string($0) }
         return [
@@ -224,8 +353,8 @@ public enum DecisionStateBuilder {
         ]
     }
 
-    /// ~4 characters per token.
-    public static func estimatedInputTokens(_ d: Decision) -> Int { requestBody(d).prettyText.count / 4 }
+    /// Approximate billed input tokens (see `DecisionVariant.estimatedInputTokens`).
+    public static func estimatedInputTokens(_ d: Decision) -> Int { DecisionVariants.v2.estimatedInputTokens(d) }
 
     // MARK: Cards
 
@@ -243,8 +372,8 @@ public enum CostEstimator {
         public var usd: Double?
     }
 
-    public static func estimate(decisions: [Decision], promptPrice: Double?) -> Estimate {
-        let p = decisions.reduce(0) { $0 + DecisionStateBuilder.estimatedInputTokens($1) }
+    public static func estimate(decisions: [Decision], promptPrice: Double?, variant: DecisionVariant = DecisionVariants.default) -> Estimate {
+        let p = decisions.reduce(0) { $0 + variant.estimatedInputTokens($1) }
         return Estimate(promptTokens: p, usd: promptPrice.map { Double(p) * $0 })
     }
 }

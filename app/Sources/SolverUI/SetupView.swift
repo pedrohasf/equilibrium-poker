@@ -42,7 +42,7 @@ struct SetupView: View {
                 get: { session.scenarioID ?? "custom" },
                 set: { id in if let s = Scenarios.named(id) { session.applyScenario(s) } else { session.scenarioID = nil } }
             )) {
-                ForEach(Scenarios.all) { s in Text(s.name).tag(s.id) }
+                ForEach(Scenarios.every) { s in Text(s.name).tag(s.id) }
                 Divider()
                 Text("Custom").tag("custom")
             }

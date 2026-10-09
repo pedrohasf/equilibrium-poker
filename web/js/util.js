@@ -139,3 +139,41 @@ export function debounce(fn, ms = 120) {
   let t;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
+
+// ── View mode ─────────────────────────────────────────────
+export const isAdvanced = () => document.documentElement.dataset.mode === "advanced";
+
+/** Redraws `draw(el)` whenever the element's width changes (and once it becomes visible). */
+export function mount(el, draw) {
+  if (!el) return;
+  let last = -1;
+  const run = () => {
+    const w = el.clientWidth;
+    if (!w || Math.abs(w - last) <= 2) return;
+    last = w;
+    draw(el);
+  };
+  new ResizeObserver(run).observe(el);
+  run();
+  return () => { last = -1; run(); };
+}
+
+/** Tiny, safe Markdown subset for notes.json: paragraphs, **bold**, *italic*, `code`, [text](url). */
+export function md(text) {
+  if (!text) return "";
+  return String(text).trim().split(/\n\s*\n/).map((p) => {
+    let h = esc(p.trim()).replace(/\n/g, " ");
+    h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|#[\w/-]+)\)/g, '<a href="$2">$1</a>');
+    return `<p>${h}</p>`;
+  }).join("");
+}
+
+/** "+4.0", "−118.1" with a real minus sign. */
+export function signed(x, d = 0) {
+  if (x == null || !isFinite(x)) return "–";
+  const v = Math.abs(x) < 0.5 * 10 ** -d ? 0 : x;
+  return (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(d);
+}
+export const minus = (s) => String(s).replace(/^-/, "−");

@@ -8,32 +8,42 @@ public protocol DecisionMaker: Sendable {
     var id: String { get }
     var displayName: String { get }
     var kind: PlayerKind { get }
+    /// State/question variant id (decision models); part of the run id. nil = none / default.
+    var variant: String? { get }
     func decide(_ decision: Decision) async throws -> DecisionResult
+}
+
+public extension DecisionMaker {
+    var variant: String? { nil }
 }
 
 // MARK: - Decision models
 
-/// Asks an OpenRouter System One decision model one `choice` question (see `DecisionStateBuilder`).
-/// The returned key maps to the action; its probabilities over the legal actions are kept so the
-/// model can also be scored as a mixed strategy. Failures and unknown keys become invalid answers.
+/// Asks an OpenRouter System One decision model about one decision, presented with a
+/// `DecisionVariant` (default `v2`: one `choice` question, see `DecisionStateBuilder`). The answer
+/// maps to an action; its probabilities over the legal actions are kept so the model can also be
+/// scored as a mixed strategy. Failures and unknown keys become invalid answers.
 public struct DecisionModelMaker: DecisionMaker {
     public let model: String
     public let provider: any DecisionProvider
+    public let presentation: DecisionVariant
 
-    public init(model: String, provider: any DecisionProvider) {
+    public init(model: String, provider: any DecisionProvider, variant: DecisionVariant = DecisionVariants.default) {
         self.model = model
         self.provider = provider
+        self.presentation = variant
     }
 
     public var id: String { model }
     public var displayName: String { model }
     public var kind: PlayerKind { .decisionModel }
+    public var variant: String? { presentation.id }
 
     public func decide(_ d: Decision) async throws -> DecisionResult {
         do {
-            let r = try await provider.decide(model: model, state: DecisionStateBuilder.state(d),
-                                              questions: DecisionStateBuilder.questions(d))
-            return Self.result(r, decision: d)
+            let (state, questions) = presentation.build(d)
+            let r = try await provider.decide(model: model, state: state, questions: questions)
+            return presentation.interpret(r, d)
         } catch is CancellationError {
             throw CancellationError()
         } catch let e as URLError where e.code == .cancelled {
@@ -43,27 +53,9 @@ public struct DecisionModelMaker: DecisionMaker {
         }
     }
 
-    /// Maps a decisions response onto the decision's actions (pure; unit-tested).
+    /// Maps a single-choice decisions response onto the decision's actions (pure; unit-tested).
     public static func result(_ r: DecideResult, decision d: Decision) -> DecisionResult {
-        func invalid(_ why: String) -> DecisionResult {
-            DecisionResult(decisionId: d.id, choice: nil, rawResponse: r.raw, error: why, latency: r.latency,
-                           promptTokens: r.usage.promptTokens, completionTokens: r.usage.completionTokens, cost: r.usage.cost)
-        }
-        guard let answer = r.answers[DecisionStateBuilder.questionId] ?? (r.answers.count == 1 ? r.answers.first?.value : nil),
-              case .choice(let key, let confidence, let probs) = answer else {
-            return invalid("No choice answer in the response")
-        }
-        guard let choice = DecisionStateBuilder.actionIndex(forKey: key, actions: d.actions) else {
-            return invalid("Unknown action key '\(key)'")
-        }
-        var vector = Array(repeating: 0.0, count: d.actions.count)
-        for (k, p) in probs {
-            if let i = DecisionStateBuilder.actionIndex(forKey: k, actions: d.actions), p.isFinite, p > 0 { vector[i] += p }
-        }
-        let p = Scoring.normalized(vector) ?? vector.indices.map { $0 == choice ? 1 : 0 }
-        return DecisionResult(decisionId: d.id, choice: choice, rawResponse: r.raw, latency: r.latency,
-                              promptTokens: r.usage.promptTokens, completionTokens: r.usage.completionTokens, cost: r.usage.cost,
-                              actionProbabilities: p, confidence: confidence)
+        DecisionVariants.singleChoice(r, d)
     }
 }
 

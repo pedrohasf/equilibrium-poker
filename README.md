@@ -83,12 +83,32 @@ whose options are the legal actions, plus derived facts (made hand, draws, pot
 odds, SPR) as the API guidance recommends. Chat/text models are intentionally
 not supported.
 
-## Benchmark methodology (short)
+## Benchmark methodology
 
-Spots are sampled from solved turn/river subgames of standard 100bb preflop
-scenarios: concrete hands are dealt from each range and the tree is walked
-following GTO play until a random decision point. Each model sees the same
-decisions and must pick one legal action. **EV loss** = EV(best action) −
-EV(chosen action) for that exact hand, against a GTO opponent. Trivial
-decisions (all actions within a small EV band) are skipped. Turn/river
-subgames start from preflop ranges, an approximation documented in the app.
+Three complementary measurements, all against equilibrium play:
+
+1. **Full-hand suites** (`generate --mode hands --format cash|mtt40|mtt20|spin`) — the
+   most realistic postflop test. A flop is solved from the scenario's preflop
+   ranges, concrete hands are dealt, and each hand is played to the end following
+   GTO; **every decision of both players on flop, turn and river** is recorded,
+   so turn/river ranges are correctly narrowed. No triviality filter. Reported as
+   **postflop bb/100 lost vs GTO** (Σ EV loss per hand ÷ 2 seats, 95% CI over
+   hands) plus per-decision metrics.
+2. **Preflop suites** (`--mode preflop`) — heads-up preflop (blind vs blind, Spin
+   HU) from the preflop solver: exact push/fold Nash at ≤12bb, a full
+   open/limp/3-bet/4-bet tree deeper, with flops valued by an equity-realisation
+   model. Reported as preflop bb/100.
+3. **Arena** — complete hands (preflop → river) in duplicate format against
+   bots that model real opponent types (TAG regular, calling station, maniac).
+
+**Formats** are distinguished by stack depth, antes and preflop ranges: cash
+100bb, MTT 40bb and 20bb (1bb big-blind ante), Spin & Go (25bb 3-handed / 15bb
+HU). Tournament results are chip EV — ICM is not modelled.
+
+**Metrics.** EV loss = EV(best action) − EV(chosen action) for the exact hand
+against a GTO opponent. Decision models return a probability for every action,
+so they are also scored as mixed strategies (mixed EV loss, total-variation
+distance to the GTO mix, P(best)). Experiments with state/question **variants**
+(`--variant v2|minimal|eq|eqrange|coach|multi|noul`), ensembles and
+temperature (`bench synth`) are tuned on a dev split and confirmed on a held-out
+test split (`bench split`, `bench compare` with paired CIs).
