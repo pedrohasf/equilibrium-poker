@@ -220,12 +220,6 @@ assets/                 AppIcon.svg, README banner (social.png), screenshots
 - **Moving targets.** Decision models are versioned and updated by their providers. Results are
   for the versions listed on the site (October 2026).
 
-## Cost
-
-The whole study cost **about $4 of OpenRouter API calls**: about 84,000 model answers across
-all experiments, including dead ends. The runs published on the site account for about $2. The
-solver, bots, scoring and exports run locally for free. The CLI prints cost estimates before
-every run.
 
 ## How this was built
 
@@ -234,7 +228,7 @@ way.** The human gave high-level direction in chat: build a TexasSolver-style so
 decision models, make the tests realistic for each game format, try to make the best model better.
 Claude Opus 5.5 did the rest, acting as orchestrator and spawning **parallel subagents**. It
 wrote the Rust solver and its tests, the SwiftUI app, the benchmark and arena engines, the CLI,
-and the website. It also designed and **ran the experiments** within an **≈ $4 API budget**:
+and the website. It also designed and **ran the experiments**:
 generating suites, calling the models, reading the results and deciding the next experiment. The
 loop was iterative (try a prompt variant, measure it, keep it or drop it), with every claimed
 improvement **tuned on a dev split and confirmed on a held-out test split** with paired confidence

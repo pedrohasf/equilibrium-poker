@@ -94,7 +94,6 @@ function hero(ctx) {
     [models.size, "AI models tested", "decision models"],
     [fmt.int(answers), "decisions judged", "decision-model answers scored"],
     arenaHands ? [fmt.int(arenaHands), "arena hands played", "arena hands (decision models)"] : null,
-    [fmt.usd(cost), "spent on API calls", "total API cost"],
   ].filter(Boolean);
   $("#hero-stats").innerHTML = stats.map(([v, s, a]) => `<div><dt><span class="simple">${esc(s)}</span><span class="adv">${esc(a)}</span></dt><dd>${esc(v)}</dd></div>`).join("");
 
