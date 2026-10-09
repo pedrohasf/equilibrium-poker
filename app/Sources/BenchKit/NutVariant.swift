@@ -85,3 +85,46 @@ extension DecisionVariants {
         },
         interpret: { r, d in singleChoice(r, d) })
 }
+
+extension DecisionVariants {
+    /// Size-specific guidance appended to bet/raise criteria (pure poker knowledge, no solver data).
+    static func sizingCriteria(_ d: Decision, base: [String: String]) -> [String: String] {
+        var c = base
+        let keys = B.actionKeys(d.actions)
+        for (i, a) in d.actions.enumerated() {
+            let f = a.potFraction
+            let note: String
+            switch a.kind {
+            case .bet, .raise:
+                if f <= 0.4 {
+                    note = " Small size: best when the hero wants many worse hands to continue — thin value with medium-strong hands,"
+                        + " protection, or a cheap probe — and on dry boards where the hero's range is strong overall. It rarely makes"
+                        + " the villain fold much, so it is a poor bluffing size."
+                } else if f >= 0.7 {
+                    note = " Large size: best with a polarised hand — very strong hands that want to build the pot quickly, or bluffs with"
+                        + " blockers/equity that need folds — on wet or dynamic boards, or when the hero holds the nut advantage. Medium-strength"
+                        + " hands usually prefer checking or a small size instead, because large bets fold out worse hands and get called by better."
+                } else {
+                    note = " Medium size: a balanced choice for value hands that still beat many calling hands and for semi-bluffs."
+                }
+            case .allin:
+                note = " All-in: maximal pressure — right with the nuts or near-nuts when the villain can call with worse, or as a bluff when"
+                    + " the stack-to-pot ratio is low and the villain's range is capped; wrong with medium hands that only get called by better."
+            default:
+                continue
+            }
+            c[keys[i]] = (c[keys[i]] ?? "") + note
+        }
+        return c
+    }
+
+    /// nuts + per-size guidance on what each bet/raise/all-in size is for.
+    public static let sizing = DecisionVariant(
+        id: "sizing", summary: "nuts + guidance on what each bet/raise size is for (small = thin value/protection, large = polarised)",
+        build: { d in
+            let (state, qs) = nuts.build(d)
+            guard case .choice(let ins, let crit)? = qs[B.questionId] else { return (state, qs) }
+            return (state, [B.questionId: .choice(instructions: ins, criteria: sizingCriteria(d, base: crit))])
+        },
+        interpret: { r, d in singleChoice(r, d) })
+}

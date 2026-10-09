@@ -1,7 +1,21 @@
+# macOS
 .DS_Store
+
+# Build outputs
 /core/target/
 /app/.build/
 /app/.swiftpm/
+.build/
+.swiftpm/
 /build/
 *.xcodeproj/xcuserdata/
+xcuserdata/
+DerivedData/
+
+# Secrets (copy .env.example to .env)
 .env
+.env.*
+!.env.example
+
+# Local tool state
+.wrangler/

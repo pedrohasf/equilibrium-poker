@@ -184,6 +184,8 @@ public enum BenchExport {
     /// Friendly model name without variant ("GPT-6 Luna Decisions"), for decision models, baselines and derived runs.
     public static func modelName(_ model: String, catalog: [String: CatalogEntry] = [:]) -> String {
         if let b = Baseline(id: model) { return b.displayName }
+        // Free endpoints of the same model (`<id>:free`).
+        if model.hasSuffix(":free") { return modelName(Findings.canonicalModel(model), catalog: catalog) + " (free endpoint)" }
         if let k = knownNames[model] { return k }
         if let c = catalog[model]?.name { return c.contains(": ") ? String(c.split(separator: ":", maxSplits: 1)[1]).trimmingCharacters(in: .whitespaces) : c }
         return model

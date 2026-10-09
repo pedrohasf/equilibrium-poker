@@ -476,7 +476,7 @@ final class BenchKitTests: XCTestCase {
     func testEveryVariantKeepsActionKeys() {
         let d = makeDecision()
         let keys = Set(DecisionStateBuilder.actionKeys(d.actions))
-        XCTAssertEqual(Set(DecisionVariants.ids), ["v2", "minimal", "eq", "eqrange", "coach", "multi", "noul", "nuts", "shortstack"])
+        XCTAssertEqual(Set(DecisionVariants.ids), ["v2", "minimal", "eq", "eqrange", "coach", "multi", "noul", "nuts", "shortstack", "sizing"])
         for v in DecisionVariants.all {
             let (state, qs) = v.build(d)
             XCTAssertFalse(qs.isEmpty, v.id)

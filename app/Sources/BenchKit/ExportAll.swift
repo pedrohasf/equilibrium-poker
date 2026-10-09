@@ -268,6 +268,9 @@ extension BenchExport {
             ("formatInfo", .a(GameFormat.allCases.map(formatObj))),
             ("variants", .a(DecisionVariants.all.map { v in .o([("id", .s(v.id)), ("summary", .s(v.summary))]) })),
             ("thresholds", .o([("handsMinDecisions", .i(minHandsDecisions)), ("preflopMinDecisions", .i(minPreflopDecisions))])),
+            ("calibration", Findings.calibrationJSON(suites: allSuites, runs: runs, focus: focusModel, catalog: catalog)),
+            ("agreement", Findings.agreementJSON(suites: allSuites, runs: runs, suiteKeys: keyOf, spotSuiteId: spot?.id, focus: focusModel,
+                                                 catalog: catalog)),
         ])
         return Bundle(manifest: manifest, spotDocument: spotDoc, suiteDocuments: docs, log: log)
     }

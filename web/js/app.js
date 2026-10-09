@@ -3,6 +3,7 @@
 import { esc, fmt, isAdvanced } from "./util.js";
 import { renderCharts, renderRail, whiskerSVG } from "./charts.js";
 import { createExplorer } from "./explorer.js";
+import { renderInsights, renderConfidence, renderAgreement, findingTakeaways } from "./findings.js";
 import { nameBook, renderFormats, renderArena, renderLuna, renderSpotSimple, heroSimple, renderTakeaways, methodSimple, methodAdvanced } from "./sections.js";
 
 const $ = (s) => document.querySelector(s);
@@ -43,11 +44,12 @@ async function getJSON(url, optional = false) {
 }
 
 async function load() {
-  const [bench, arena, notes] = await Promise.all([getJSON("data/bench.json", true), getJSON("data/arena.json", true), getJSON("data/notes.json", true)]);
+  const [bench, arena, notes, insights] = await Promise.all([getJSON("data/bench.json", true), getJSON("data/arena.json", true), getJSON("data/notes.json", true),
+    getJSON("data/insights.json", true)]);
   // Older exports: only results.json (the spot suite with decisions).
   const spot = bench?.spot ?? (bench ? null : await getJSON("data/results.json", true));
   if (!bench && !spot) throw new Error("data/bench.json (or data/results.json) not found");
-  return { bench, arena, notes, spot };
+  return { bench, arena, notes, spot, insights };
 }
 
 const DM = (p) => p.kind === "decisionModel";
@@ -79,14 +81,14 @@ function hero(ctx) {
   // Totals across every part.
   const models = new Set();
   let answers = 0, cost = 0;
-  for (const p of spot?.players ?? []) if (DM(p)) { models.add(p.model); answers += p.answered; cost += p.cost?.total ?? 0; }
+  for (const p of spot?.players ?? []) if (DM(p)) { models.add(p.model.replace(/:free$/, "")); answers += p.answered; cost += p.cost?.total ?? 0; }
   for (const s of bench?.suites ?? []) for (const p of s.players) {
     if (p.kind !== "decisionModel") continue;
-    models.add(p.model); answers += p.answered; cost += p.cost ?? 0;
+    models.add(p.model.replace(/:free$/, "")); answers += p.answered; cost += p.cost ?? 0;
   }
   let arenaHands = 0;
   for (const m of arena?.matches ?? []) if (!m.reference) arenaHands += m.hands;
-  for (const p of arena?.pairs ?? []) if (p.player.startsWith("dm:")) { models.add(arena.players.find((x) => x.id === p.player)?.model); cost += p.cost ?? 0; }
+  for (const p of arena?.pairs ?? []) if (p.player.startsWith("dm:")) { models.add(arena.players.find((x) => x.id === p.player)?.model?.replace(/:free$/, "")); cost += p.cost ?? 0; }
   models.delete(undefined);
   const stats = [
     [models.size, "AI models tested", "decision models"],
@@ -327,7 +329,10 @@ try {
   const ctx = await load();
   ctx.book = nameBook(ctx.bench, ctx.spot);
   hero(ctx);
+  renderInsights(ctx.insights, ctx.bench);
+  ctx.extraTakeaways = findingTakeaways(ctx.bench);
   renderTakeaways(ctx);
+  renderConfidence(ctx.bench);
   if (ctx.spot) {
     renderRail(ctx.spot, $("#rail-plot"));
     spotHead(ctx.spot);
@@ -339,6 +344,7 @@ try {
     $("#rail").hidden = true;
     spotHead(null);
   }
+  renderAgreement(ctx.bench);
   renderFormats(ctx.bench, ctx.notes);
   renderArena(ctx.arena, ctx.book, ctx.notes);
   renderLuna(ctx.bench, ctx.notes);
@@ -346,6 +352,8 @@ try {
   methodAdvanced(ctx);
   footer(ctx);
   setupExplorer(ctx);
+  // Sections render after load: honour a section hash (#confidence, #agreement…) once content exists.
+  if (location.hash && !location.hash.startsWith("#insight-") && /^#[a-z][\w-]*$/i.test(location.hash)) document.getElementById(location.hash.slice(1))?.scrollIntoView();
 } catch (err) {
   console.error(err);
   $("#verdict").innerHTML = `Could not load the results (${esc(err.message)}). Serve this folder over HTTP — for example <code>python3 -m http.server</code> inside <code>web/</code> — and check that <code>data/bench.json</code> exists (<code>eqbench bench export --all</code> writes it).`;

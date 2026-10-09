@@ -46,7 +46,7 @@ public enum DecisionVariants {
     public static let defaultId = "v2"
 
     /// Registry, in display order.
-    public static let all: [DecisionVariant] = [v2, minimal, eq, eqrange, coach, multi, noul, nuts, shortstack]
+    public static let all: [DecisionVariant] = [v2, minimal, eq, eqrange, coach, multi, noul, nuts, shortstack, sizing]
 
     public static func named(_ id: String) -> DecisionVariant? { all.first { $0.id == id.lowercased() } }
     public static var `default`: DecisionVariant { v2 }

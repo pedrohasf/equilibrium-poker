@@ -530,6 +530,7 @@ export function renderSpotSimple(spot) {
 
 // ── Takeaways & hero (simple) ──────────────────────────────
 export function heroSimple(ctx) {
+  if (ctx.notes?.hero) return md(ctx.notes.hero).replace(/<\/?p[^>]*>/g, "");
   const { spot, bench, arena, book } = ctx;
   const A = arenaSummary(arena, book), S = formatsSummary(bench);
   const top = A?.byTag[0];
@@ -552,7 +553,7 @@ export function heroSimple(ctx) {
 
 export function renderTakeaways(ctx) {
   const { spot, bench, arena, book } = ctx;
-  const items = [];
+  const items = [...(ctx.extraTakeaways ?? [])];
   const dms = spot?.players?.filter((p) => p.kind === "decisionModel") ?? [];
   const cs = spot?.players?.find((p) => p.baseline === "callingStation")?.overall.score;
   if (dms.length) {
@@ -582,7 +583,7 @@ export function renderTakeaways(ctx) {
   const el = $("#takeaways");
   if (!items.length) { el.hidden = true; return; }
   el.hidden = false;
-  $("#tk-list").innerHTML = items.map(([h, t, href]) => `<li><h3>${esc(h)}</h3><p>${esc(t)}</p><a href="${href}">See the chart</a></li>`).join("");
+  $("#tk-list").innerHTML = items.map(([h, t, href, featured]) => `<li${featured ? ` class="featured"` : ""}><h3>${esc(h)}</h3><p>${esc(t)}</p><a href="${href}">See the chart</a></li>`).join("");
 }
 
 // ── Methodology: simple and advanced additions ────────────
@@ -613,6 +614,8 @@ export function methodAdvanced(ctx) {
       <div><h3>Dev / test protocol</h3><p>Experiments run on <code>eqbench bench split</code> halves of a hands suite, split by hand: configurations are compared on <strong>dev</strong> and only the chosen ones are run on the held-out <strong>test</strong> half. Differences are paired (same hands, same decisions) — much tighter than comparing two independent bb/100 estimates. Baselines on splits are borrowed from the parent suite.</p></div>
       <div class="full"><h3>Request variants</h3><dl class="metrics">${variants}</dl>
         <p>Derived players (<code>bench synth</code>) reuse stored answers with no API calls: <strong>temper</strong> raises probabilities to τ (τ = ∞ is argmax), <strong>ensemble</strong> averages several runs' probabilities, <strong>guardrail</strong> moves fold probability to call when a heuristic equity beats the price — that one is labelled <em>hybrid</em> because non-model information changes answers.</p></div>
+      <div class="full"><h3>Confidence and agreement</h3><p><strong>Calibration</strong> pools every decision-model answer that returned probabilities (all suites, splits and variants; the free Mercury endpoint is merged with the paid one) and buckets it by the model's top probability; per bucket: share of answers, best-action rate (pick within 0.25% pot of the top EV) and mean EV loss % pot with a 95% CI. <strong>Agreement</strong> takes, per suite and variant, the decisions answered by at least three of Luna, Jev, Mercury, d1 and Clef; the plurality pick (ties → lowest action index) is scored like a player (“majority vote”). <strong>Escalation</strong> replaces Luna's pick with another model's when Luna's top probability is below a threshold. <strong>Bet-sizing share</strong> = EV loss where the chosen and best-EV actions are both bet/raise/all-in of different sizes ÷ total loss. Computed by the exporter (<code>Findings.swift</code>) into <code>bench.json</code>.</p></div>
+      <div class="full"><h3>Who built this</h3><p>This project is 100% vibe-coded: the solver, the benchmark, the experiments and this site were all built by <strong>Claude Opus 5.5</strong> (medium effort) orchestrating subagents, from a human's high-level chat prompts.</p></div>
       <div class="full"><h3>Arena</h3><p>Complete heads-up hands, preflop to river, 100bb, in duplicate format (each deal played twice with seats swapped). Decision models play their top choice (argmax) or sample their distribution (“sampled”). bb/100 and all-in-EV bb/100 with 95% CIs over duplicate pairs; matches with < ${arena?.minHands ?? 100} hands and self-play are excluded. Bots:</p>
         <ul>${(arena?.bots ?? []).map((b) => `<li><strong>${esc(b.title)}</strong> (<code>${esc(b.id)}</code>) — ${esc(b.summary)}</li>`).join("")}</ul></div>
     </div>`;
