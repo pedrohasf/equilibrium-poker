@@ -30,8 +30,6 @@ Benchmark state lives outside the repo, in `~/Library/Application Support/Equili
 - Swift: `cd app && swift test`. This covers solver wrappers, suite generation, variants, scoring,
   the arena engine and exports. No test calls the network.
 
-CI (`.github/workflows/ci.yml`) runs both on a macOS 26 runner.
-
 ## Adding a decision-model variant (prompt or state)
 
 Variants live in `app/Sources/BenchKit/DecisionVariants.swift`. Larger ones get their own file,

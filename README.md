@@ -97,7 +97,7 @@ is in the site's advanced mode.
 Requirements: **macOS 26+, Xcode 26+ (Swift 6), Rust stable.**
 
 ```sh
-git clone <this repo> equilibrium && cd equilibrium
+git clone https://github.com/pedrohasf/equilibrium-poker.git && cd equilibrium-poker
 make run          # builds the Rust core + SwiftUI app, assembles build/Equilibrium.app and opens it
 make test         # Rust + Swift tests
 make bench-cli    # builds the eqbench CLI → app/.build/release/eqbench
