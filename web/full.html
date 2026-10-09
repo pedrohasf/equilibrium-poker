@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Can decision models play poker? · Equilibrium benchmark</title>
+  <meta name="description" content="OpenRouter System One decision models play no-limit hold'em against a perfect-play solver and against bots: solved spots, full hands in cash games and tournaments, and a heads-up arena.">
+  <meta property="og:title" content="Can decision models play poker?">
+  <meta property="og:description" content="AI decision models vs. a poker solver: when GPT-6 Luna is over 80% sure it picks the best move 78% of the time; when it's torn, barely half — and those decisions cost 3× more. 100% vibe-coded, orchestrated by Claude Opus 5.5.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://equilibrium-poker.pages.dev/full.html">
+  <meta property="og:image" content="https://equilibrium-poker.pages.dev/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Can decision models play poker? 11 OpenRouter decision models vs a GTO solver and vs bots.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Can decision models play poker?">
+  <meta name="twitter:description" content="When the model is sure it's right 78% of the time; when it's torn it's barely better than a coin flip — and those decisions cost 3× more.">
+  <meta name="twitter:image" content="https://equilibrium-poker.pages.dev/og.png">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#05201a">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preload" href="data/bench.json" as="fetch" crossorigin>
+  <link rel="preload" href="data/insights.json" as="fetch" crossorigin>
+  <script>
+    // Theme and view mode before first paint. ?mode=advanced|simple wins over the saved choice.
+    try {
+      const t = localStorage.getItem("eq-theme"); if (t) document.documentElement.dataset.theme = t;
+      const q = new URLSearchParams(location.search).get("mode");
+      const m = q === "advanced" || q === "simple" ? q : localStorage.getItem("eq-mode");
+      document.documentElement.dataset.mode = m === "advanced" ? "advanced" : "simple";
+    } catch { document.documentElement.dataset.mode = "simple"; }
+  </script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the results</a>
+
+  <header class="topbar">
+    <a class="wordmark" href="#top" aria-label="Equilibrium benchmark, back to top">
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="wordmark-chip"><use href="#chip"/></svg>
+      <span>Equilibrium</span><span class="wordmark-sub">bench</span>
+    </a>
+    <nav aria-label="Sections">
+      <a href="./">← Highlights</a>
+      <a href="#insights">Insights</a>
+      <a href="#confidence">Confidence</a>
+      <a href="#spot-bench">Spots</a>
+      <a href="#agreement">Agreement</a>
+      <a href="#formats">Formats</a>
+      <a href="#arena">Arena</a>
+      <a href="#luna">Luna</a>
+      <a href="#explorer" class="adv">Explorer</a>
+      <a href="#method">Method</a>
+    </nav>
+    <div class="mode-switch" role="group" aria-label="Level of detail">
+      <button type="button" data-mode="simple" aria-pressed="true" title="Plain-language summary">Simple</button>
+      <button type="button" data-mode="advanced" aria-pressed="false" title="Every metric, confidence interval and breakdown">Advanced</button>
+    </div>
+    <button class="theme-toggle" type="button" aria-label="Switch colour theme" title="Switch colour theme">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 7a5 5 0 0 0 0 10z" class="half"/></svg>
+    </button>
+  </header>
+
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-inner">
+        <p class="eyebrow" id="hero-eyebrow">No-limit hold'em · decision models vs. perfect play and vs. bots</p>
+        <p class="vibe-badge simple"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l1.6 4.2 4.4.3-3.4 2.8 1.1 4.3L8 10.7l-3.7 2.4 1.1-4.3L2 6l4.4-.3z"/></svg>100% vibe-coded · orchestrated by Claude Opus 5.5</p>
+        <h1 id="hero-title">Can decision models <em>play poker?</em></h1>
+        <p class="verdict" id="verdict">Loading results…</p>
+        <dl class="hero-stats" id="hero-stats"></dl>
+      </div>
+      <figure class="rail" id="rail" aria-labelledby="rail-cap">
+        <div class="rail-plot" id="rail-plot"></div>
+        <figcaption id="rail-cap"></figcaption>
+      </figure>
+    </section>
+
+    <div class="notice" id="notice" hidden></div>
+
+    <div id="main" tabindex="-1"></div>
+
+    <!-- Insights: every key finding as a deep-linkable card (data/insights.json + live numbers from bench.json) -->
+    <section class="block insights-block" id="insights" aria-labelledby="in-title">
+      <header class="block-head">
+        <p class="eyebrow">Insights · the key findings</p>
+        <h2 id="in-title">What we learned</h2>
+        <p class="lede simple">Fifteen things we found by making AI models play poker against a perfect-play solver and against bots. Each card links to the evidence.</p>
+        <p class="lede adv">Each card shows the exact statistic, sample size and 95% CI where available. Cards marked <span class="live-tag">live</span> are computed from the current export (<code>bench.json</code>); the others come from <code>data/insights.json</code>. Every card is linkable (<code>#insight-…</code>).</p>
+      </header>
+      <ol class="insights" id="in-list"></ol>
+    </section>
+
+    <section class="block simple" id="takeaways" aria-labelledby="tk-title" hidden>
+      <header class="block-head">
+        <p class="eyebrow">The short version</p>
+        <h2 id="tk-title">What we found</h2>
+        <p class="lede"><a href="#insights">See all the insights →</a></p>
+      </header>
+      <ol class="takeaways" id="tk-list"></ol>
+    </section>
+
+    <!-- Featured finding: calibration -->
+    <section class="block featured" id="confidence" aria-labelledby="cf-title">
+      <header class="block-head">
+        <p class="eyebrow">Featured finding · confidence</p>
+        <h2 id="cf-title">The models know when they're unsure</h2>
+        <p class="headline" id="cf-headline"></p>
+        <p class="lede simple">Every answer comes with a probability for each move. We grouped the answers by how much the model put on its favourite move — how sure it was — and checked how often that move was really the best one, and what the mistakes cost.</p>
+        <p class="lede adv" id="cf-def"></p>
+      </header>
+      <div class="seg-row" id="cf-controls"></div>
+      <figure class="chart big conf-fig" id="cf-chart">
+        <figcaption><h3 id="cf-chart-title">How sure the model was → how often it picked the best move</h3><p id="cf-chart-sub"></p></figcaption>
+        <div class="conf" id="cf-bars"></div>
+      </figure>
+      <div class="adv">
+        <h3 class="sub-h">Reliability diagram</h3>
+        <div class="charts-grid">
+          <figure class="chart" id="cf-rel">
+            <figcaption><h3>Stated confidence vs. how often it was right</h3><p>x = mean top probability in the bin, y = share of picks within 0.25% pot of the best EV. Dashed diagonal = perfectly calibrated. Bins with fewer than 20 answers are hidden.</p></figcaption>
+            <div class="legend" id="cf-rel-legend"></div>
+            <div class="plot"></div>
+          </figure>
+          <figure class="chart" id="cf-esc">
+            <figcaption><h3>Escalation: a second opinion only when unsure</h3><p id="cf-esc-sub"></p></figcaption>
+            <div class="seg-row" id="cf-esc-pick"></div>
+            <div class="legend" id="cf-esc-legend"></div>
+            <div class="plot"></div>
+          </figure>
+        </div>
+        <h3 class="sub-h">Every model, every bucket</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Calibration by model">
+          <table class="lb compact" id="cf-table"><thead></thead><tbody></tbody></table>
+        </div>
+        <p class="footnote" id="cf-foot"></p>
+        <h3 class="sub-h" id="cf-var-title">By prompt variant</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Calibration by variant">
+          <table class="lb compact" id="cf-var"><thead></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Part 1: solved spots -->
+    <section class="block" id="spot-bench" aria-labelledby="sb-title">
+      <header class="block-head">
+        <p class="eyebrow" id="sb-eyebrow">Part 1 · solved spots</p>
+        <h2 id="sb-title">The spot test</h2>
+        <p class="headline" id="sb-headline"></p>
+        <p class="lede simple">Each model saw the same turn and river situations and picked a move. We compared every pick with the move a poker solver (a perfect-play computer) would make.</p>
+      </header>
+      <figure class="chart big simple" id="ch-score-simple">
+        <figcaption><h3>Points kept, out of 100</h3><p>100 = always picks the best move. The bar around each dot shows how sure we are (95% range). Gold lines are simple bots, for scale.</p></figcaption>
+        <div class="plot"></div>
+      </figure>
+
+      <div class="adv" id="leaderboard">
+        <p class="eyebrow" id="lb-eyebrow"></p>
+        <h3 class="sub-h">Leaderboard</h3>
+        <p class="lede">Ranked by GTO score. Every decision model is scored twice: on the action it picked (argmax) and on the full probability distribution it returned (mixed). Reference bots are shown in gold for scale. Click a column heading to sort.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="lb-title">
+          <table class="lb" id="lb">
+            <caption class="sr-only" id="lb-title">Spot benchmark leaderboard. Columns are sortable.</caption>
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="footnote" id="lb-foot"></p>
+      </div>
+
+      <div class="adv" id="charts">
+        <h3 class="sub-h">Six views of the same table</h3>
+        <div class="charts-grid">
+          <figure class="chart wide" id="ch-score">
+            <figcaption><h3>GTO score, with 95% confidence intervals</h3><p>Dot = mean score; whisker = 95% CI. Vertical lines are the reference bots.</p></figcaption>
+            <div class="plot"></div>
+          </figure>
+          <figure class="chart" id="ch-mixed">
+            <figcaption><h3>Picking vs. playing the distribution</h3><p>EV lost per decision, % of pot. Argmax = the model's pick; mixed = sampling its probabilities.</p></figcaption>
+            <div class="legend" data-legend="mixed"></div>
+            <div class="plot"></div>
+          </figure>
+          <figure class="chart" id="ch-cost">
+            <figcaption><h3>Price vs. play</h3><p>GTO score against cost per 1,000 decisions (log scale). Up and left is better.</p></figcaption>
+            <div class="plot"></div>
+          </figure>
+          <figure class="chart" id="ch-street">
+            <figcaption><h3>Turn vs. river</h3><p>GTO score by street.</p></figcaption>
+            <div class="legend" data-legend="street"></div>
+            <div class="plot"></div>
+          </figure>
+          <figure class="chart" id="ch-type">
+            <figcaption><h3>Leading vs. facing a bet</h3><p>GTO score when checking/betting first vs. when facing a bet.</p></figcaption>
+            <div class="legend" data-legend="type"></div>
+            <div class="plot"></div>
+          </figure>
+          <figure class="chart wide" id="ch-latency">
+            <figcaption><h3>Latency per decision</h3><p>Median response time (dot) and 90th percentile (end of line), seconds, log scale.</p></figcaption>
+            <div class="plot"></div>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <!-- Cross-model agreement -->
+    <section class="block" id="agreement" aria-labelledby="ag-title">
+      <header class="block-head">
+        <p class="eyebrow">Part 1b · five models, one decision</p>
+        <h2 id="ag-title">When all five agree</h2>
+        <p class="headline" id="ag-headline"></p>
+        <p class="lede simple">We asked five different AI models the same questions and looked at how many of them chose the same move — and whether the move most of them chose was any good.</p>
+        <p class="lede adv" id="ag-def"></p>
+      </header>
+      <div class="seg-row adv" id="ag-pick"></div>
+      <div class="agree-grid">
+        <figure class="chart" id="ag-chart">
+          <figcaption><h3 id="ag-chart-title">How many models agreed → what the shared pick cost</h3><p id="ag-chart-sub"></p></figcaption>
+          <div class="agree" id="ag-levels"></div>
+        </figure>
+        <figure class="chart" id="ag-vote">
+          <figcaption><h3>Majority vote vs. the best single model</h3><p>Average share of the pot given away per decision. <strong>Shorter is better.</strong></p></figcaption>
+          <div class="plot"></div>
+        </figure>
+      </div>
+      <div class="adv">
+        <h3 class="sub-h">Per model on the same decisions</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Models on shared decisions">
+          <table class="lb compact" id="ag-players"><thead></thead><tbody></tbody></table>
+        </div>
+        <figure class="chart" id="ag-sizing" style="margin-top:18px">
+          <figcaption><h3>Bet sizing: share of each model's loss from the right action at the wrong size</h3><p id="ag-sizing-sub"></p></figcaption>
+          <div class="plot"></div>
+        </figure>
+        <h3 class="sub-h">Every suite</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Agreement in every suite">
+          <table class="lb compact" id="ag-groups"><thead></thead><tbody></tbody></table>
+        </div>
+        <p class="footnote" id="ag-foot"></p>
+      </div>
+    </section>
+
+    <!-- Part 2: full hands by format -->
+    <section class="block" id="formats" aria-labelledby="fm-title">
+      <header class="block-head">
+        <p class="eyebrow">Part 2 · full hands, every format</p>
+        <h2 id="fm-title">Real hands, cash to tournaments</h2>
+        <p class="headline" id="fm-headline"></p>
+        <p class="lede simple">Here the models play whole hands — every decision from the flop to the river, or every decision before the flop — in the formats people actually play. We count how many big blinds they give away per 100 hands compared with perfect play. <strong>Lower is better; 0 is perfect.</strong></p>
+        <p class="lede adv">Postflop suites: flops solved from each format's preflop ranges, hands dealt and played to the end along the GTO line, every decision of both seats recorded. Preflop suites: heads-up blind-vs-blind / Spin HU trees from the preflop solver. Metric: bb/100 lost vs GTO = 100 × mean over hands of Σ EV loss ÷ 2 (the model plays both seats), 95% CI over hands. Hands shared by a suite and its dev/test splits are counted once.</p>
+      </header>
+      <div class="notes" id="fm-notes"></div>
+      <div class="seg-row adv" id="fm-controls"></div>
+      <div class="facets" id="fm-facets"></div>
+      <div class="adv">
+        <h3 class="sub-h">Every player, every format</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="bb/100 lost by format">
+          <table class="lb compact" id="fm-table"><thead></thead><tbody></tbody></table>
+        </div>
+        <p class="footnote" id="fm-foot"></p>
+        <h3 class="sub-h">Suites</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Published suites">
+          <table class="lb compact" id="fm-suites"><thead></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Part 3: arena -->
+    <section class="block" id="arena" aria-labelledby="ar-title">
+      <header class="block-head">
+        <p class="eyebrow">Part 3 · the arena</p>
+        <h2 id="ar-title">Heads-up against real opponents</h2>
+        <p class="headline" id="ar-headline"></p>
+        <p class="lede simple">Perfect play is one yardstick; real opponents are another. Each model played hundreds of complete heads-up hands against two bots: a <strong>solid regular</strong> that plays tight and aggressive, and a <strong>calling station</strong> that never folds. Every deal is played twice with the seats swapped, so luck of the cards mostly cancels out. <strong>Higher is better</strong>; above 0 means the model won.</p>
+        <p class="lede adv">Duplicate heads-up matches, 100bb, every deal played twice with seats swapped. bb/100 ± 95% CI over duplicate pairs (pooled across matches of the same pairing); all-in EV bb/100 removes all-in luck. Matches with fewer than <span id="ar-min">100</span> hands and self-play are excluded; bot-vs-bot matches are references.</p>
+      </header>
+      <div class="notes" id="ar-notes"></div>
+      <div class="legend" id="ar-legend"></div>
+      <div class="facets" id="ar-facets"></div>
+      <div class="adv">
+        <h3 class="sub-h">Decision models vs. bots</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Arena results">
+          <table class="lb compact" id="ar-table"><thead></thead><tbody></tbody></table>
+        </div>
+        <p class="footnote" id="ar-foot"></p>
+        <h3 class="sub-h">Bot vs. bot references</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Bot reference matches">
+          <table class="lb compact" id="ar-ref"><thead></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Part 4: Luna experiments -->
+    <section class="block" id="luna" aria-labelledby="lu-title">
+      <header class="block-head">
+        <p class="eyebrow">Part 4 · experiments</p>
+        <h2 id="lu-title">Pushing GPT-6 Luna</h2>
+        <p class="headline" id="lu-headline"></p>
+        <p class="lede simple">Can a model get better just by asking differently? We tried several ways of describing the table and asking the question. Each idea was tuned on one set of practice hands, then checked on <strong>fresh hands it had never seen</strong> — the only result that counts.</p>
+        <p class="lede adv">Variants of the request (state and question) and post-hoc players derived from stored answers, on the dev split (tuning) and the held-out test split (confirmation) of the cash hands suite. Δ = paired difference in bb/100 lost vs the default variant (v2) over the hands both answered, 95% CI. Negative is better. Hybrid players use non-model heuristics and are not pure model results.</p>
+      </header>
+      <div class="notes" id="lu-notes"></div>
+      <div class="seg-row" id="lu-pick" hidden></div>
+      <div class="seg-row adv" id="lu-controls"></div>
+      <div class="legend" id="lu-legend"></div>
+      <figure class="chart big" id="lu-chart">
+        <figcaption><h3 id="lu-chart-title"></h3><p id="lu-chart-sub"></p></figcaption>
+        <div class="plot"></div>
+      </figure>
+      <div class="adv">
+        <h3 class="sub-h">Dev and test, side by side</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Luna experiments">
+          <table class="lb compact" id="lu-table"><thead></thead><tbody></tbody></table>
+        </div>
+        <p class="footnote" id="lu-foot"></p>
+      </div>
+    </section>
+
+    <!-- Explorer (advanced) -->
+    <section class="block adv" id="explorer" aria-labelledby="spots-title">
+      <header class="block-head">
+        <p class="eyebrow" id="spots-eyebrow">Every hand, every answer</p>
+        <h2 id="spots-title">Spot explorer</h2>
+        <p class="lede">Pick a suite and a decision to see the table as the models saw it, the solver's strategy for the hero's exact hand, and what each model would have done. Links like <code>#d042</code> (spot suite) or <code>#cash-hands-dev/d042</code> open a decision directly. Use <kbd>J</kbd> / <kbd>K</kbd> to step through the list.</p>
+      </header>
+      <div class="explorer" id="ex-root">
+        <div class="ex-filters" role="group" aria-label="Filter spots">
+          <label class="pick">Suite <select id="ex-suite"></select></label>
+          <div class="seg" data-filter="street" role="radiogroup" aria-label="Street"></div>
+          <div class="seg" data-filter="type" role="radiogroup" aria-label="Situation">
+            <button type="button" role="radio" aria-checked="true" data-v="all">Any action</button>
+            <button type="button" role="radio" aria-checked="false" data-v="firstToAct">Check / bet</button>
+            <button type="button" role="radio" aria-checked="false" data-v="facingBet">Facing a bet</button>
+          </div>
+          <label class="toggle"><input type="checkbox" data-filter="split"> Models disagree</label>
+          <label class="toggle"><input type="checkbox" data-filter="blunder"> Someone blundered</label>
+          <span class="ex-count" id="ex-count" aria-live="polite"></span>
+        </div>
+        <div class="ex-body">
+          <ol class="ex-list" id="ex-list" aria-label="Decisions"></ol>
+          <article class="ex-spot" id="ex-spot" aria-live="polite"></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="block method" id="method" aria-labelledby="method-title">
+      <header class="block-head">
+        <p class="eyebrow" id="method-eyebrow">How the numbers are made</p>
+        <h2 id="method-title">How we tested</h2>
+      </header>
+      <div class="method-grid simple" id="method-simple"></div>
+      <div class="method-grid adv" id="method-body"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div>
+      <p class="footer-mark">Built with <strong>Equilibrium</strong>, a macOS GTO poker lab with a Rust DCFR solver.</p>
+      <p class="vibe-line">100% vibe-coded: the solver, the benchmark, the experiments and this site were built by <strong>Claude Opus 5.5</strong> (medium effort) orchestrating subagents, from a human's high-level chat prompts.</p>
+      <p id="footer-meta"></p>
+    </div>
+    <div class="adv">
+      <h2 class="footer-h">Reproduce it</h2>
+<pre class="code"><code>make bench-cli
+export OPENROUTER_API_KEY=sk-or-...
+eqbench bench generate --mode hands --format cash --hands 120
+eqbench bench split --suite &lt;id&gt;
+eqbench bench baselines --suite &lt;id&gt;
+eqbench bench run --suite &lt;id&gt;-dev --models openai/gpt-6-luna-decisions --variant v2,eq
+eqbench arena match --a openai/gpt-6-luna-decisions --b bot:tag --deals 250
+eqbench bench export --all &amp;&amp; eqbench arena export   # → web/data/</code></pre>
+    </div>
+  </footer>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="chip" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="11" fill="currentColor"/>
+      <circle cx="12" cy="12" r="9.2" fill="none" stroke="var(--chip-edge, #fff)" stroke-width="2.6" stroke-dasharray="3.6 3.6" opacity=".85"/>
+      <circle cx="12" cy="12" r="6" fill="none" stroke="var(--chip-edge, #fff)" stroke-width=".8" opacity=".7"/>
+    </symbol>
+  </svg>
+</body>
+</html>

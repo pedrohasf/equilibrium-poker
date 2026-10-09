@@ -170,13 +170,17 @@ differences on a re-run.
 
 ## Results website
 
+Live at **https://equilibrium-poker.pages.dev**. The homepage is a skimmable "AI Poker
+Championship" highlight reel; `full.html` has every chart, confidence interval and the decision
+explorer (Simple/Advanced modes).
+
 ```sh
-cd web && python3 -m http.server 8000      # http://localhost:8000  (?mode=advanced for every metric)
+cd web && python3 -m http.server 8000      # http://localhost:8000 · full results: /full.html?mode=advanced
 ```
 
 `web/` is the whole site, with no build step. The data is in `web/data/*.json` (exported by the
-CLI). The prose conclusions are in `web/data/notes.json`. See [`web/README.md`](web/README.md).
-`.github/workflows/pages.yml` deploys it to GitHub Pages.
+CLI); the insight cards are in `web/data/insights.json` and the prose in `web/data/notes.json`.
+See [`web/README.md`](web/README.md).
 
 <p align="center"><img src="assets/screenshots/luna.png" alt="Which prompt ideas helped GPT-6 Luna, dev vs. held-out test" width="820"></p>
 

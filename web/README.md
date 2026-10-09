@@ -6,7 +6,8 @@ and vs. bots (arena), plus the prompt-variant experiments.
 
 ```
 web/
-  index.html            single page: hero, takeaways, spots, formats, arena, Luna experiments, explorer, method
+  index.html            homepage: "AI Poker Championship" highlight reel (broadcast.css, broadcast.js)
+  full.html             full results: insights, confidence, spots, agreement, formats, arena, Luna, explorer, method
   styles.css            all styles (dark/light via prefers-color-scheme + a toggle; simple/advanced view modes)
   js/app.js             entry: loads data/bench.json + arena.json + notes.json, renders every section, view mode
   js/sections.js        formats, arena and Luna sections, simple-mode headlines/takeaways, methodology
