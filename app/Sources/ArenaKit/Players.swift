@@ -76,8 +76,26 @@ public enum DecisionMode: String, Codable, Sendable, CaseIterable {
     case argmax
     /// Sample from the returned probabilities (seeded), i.e. play a randomized strategy.
     case mixed
+    /// Top choice, with the benchmark-confirmed extra facts: exact nut ranking postflop and
+    /// short-stack guidance preflop (≤30bb).
+    case plus
 
-    public var title: String { self == .argmax ? "Argmax" : "Mixed" }
+    public var title: String {
+        switch self {
+        case .argmax: return "Argmax"
+        case .mixed: return "Mixed"
+        case .plus: return "Plus (enhanced facts)"
+        }
+    }
+
+    /// Leaderboard id / name suffix.
+    public var suffix: String {
+        switch self {
+        case .argmax: return ""
+        case .mixed: return "~mix"
+        case .plus: return "~plus"
+        }
+    }
 }
 
 /// Serializable description of a participant: a bot or an OpenRouter System One decision model.
@@ -113,7 +131,7 @@ public struct PlayerSpec: Codable, Hashable, Sendable, Identifiable {
     public var id: String {
         switch kind {
         case .bot: return "bot:\(model)"
-        case .decision: return "dm:\(model)" + (mode == .mixed ? "~mix" : "")
+        case .decision: return "dm:\(model)" + mode.suffix
         }
     }
 
@@ -123,7 +141,7 @@ public struct PlayerSpec: Codable, Hashable, Sendable, Identifiable {
     public var displayName: String {
         if let b = bot { return b.title }
         let base = String(model.split(separator: "/").last ?? Substring(model))
-        return base + (mode == .mixed ? " · mixed" : "")
+        return base + (mode == .mixed ? " · mixed" : mode == .plus ? " · plus" : "")
     }
 
     /// Provider segment ("typesafe") or "bot".
@@ -152,6 +170,7 @@ public struct PlayerSpec: Codable, Hashable, Sendable, Identifiable {
             switch body[r.upperBound...].lowercased() {
             case "mix", "mixed", "sample": mode = .mixed
             case "argmax", "max", "top": mode = .argmax
+            case "plus", "enhanced": mode = .plus
             default: return nil
             }
             body = String(body[..<r.lowerBound])

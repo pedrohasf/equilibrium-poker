@@ -74,12 +74,12 @@ public struct DecisionModelPlayer: ArenaPlayer {
         self.client = client
     }
 
-    public var name: String { "dm:\(model)" + (mode == .mixed ? "~mix" : "") }
+    public var name: String { "dm:\(model)" + mode.suffix }
 
     public func decide(_ ctx: DecisionContext) async throws -> Decision {
         let keys = DecisionPrompt.keys(for: ctx.menu)
-        let state = DecisionPrompt.state(for: ctx, includeSummary: includeMatchSummary)
-        let question = DecisionPrompt.question(for: ctx, keys: keys)
+        let state = DecisionPrompt.state(for: ctx, includeSummary: includeMatchSummary, enhanced: mode == .plus)
+        let question = DecisionPrompt.question(for: ctx, keys: keys, enhanced: mode == .plus)
         let stateText = DecisionPrompt.compactJSON(state)
         var meta = DecisionMeta()
         var trace = DecisionTrace(mode: mode, options: zip(keys, ctx.menu).map { .init(key: $0, label: $1.label) }, state: stateText)
@@ -205,7 +205,7 @@ public enum DecisionPrompt {
 
     // MARK: Question
 
-    public static func question(for ctx: DecisionContext, keys: [String]? = nil) -> DecisionQuestion {
+    public static func question(for ctx: DecisionContext, keys: [String]? = nil, enhanced: Bool = false) -> DecisionQuestion {
         let keys = keys ?? self.keys(for: ctx.menu)
         var criteria: [String: String] = [:]
         for (k, o) in zip(keys, ctx.menu) { criteria[k] = describe(o, ctx: ctx) }
@@ -215,7 +215,20 @@ public enum DecisionPrompt {
         wins the most big blinds in the long run against this opponent, as a strong game-theory-aware player would. \
         Exactly one of the listed legal actions must be chosen.
         """
-        return .choice(instructions: instructions, criteria: criteria)
+        guard enhanced else { return .choice(instructions: instructions, criteria: criteria) }
+        let s = ctx.state, me = ctx.seat
+        let effectiveBB = Chips.bb(min(s.stacks[me] + s.streetContrib[me], s.stacks[1 - me] + s.streetContrib[1 - me]))
+        var extra = ""
+        if s.boardCount >= 3 {
+            extra = " Hand strength matters most in big pots: with the nuts or a near-nut hand on the river, choose the action that extracts"
+                + " the most chips (usually a bet or raise, including large sizes); on earlier streets with a very strong hand, just calling"
+                + " can be right when it keeps the opponent's bluffs and weaker hands in, especially on dry or paired boards."
+        } else if effectiveBB <= 30 {
+            extra = " Stack depth changes preflop strategy: with 25 big blinds or less, a small raise that commits a large part of the stack"
+                + " is rarely best — the strong options are usually to limp or call, to fold, or to go all-in (which wins the blinds"
+                + " immediately when the opponent folds). Facing an all-in, call when the hand is strong enough given the price."
+        }
+        return .choice(instructions: instructions + extra, criteria: criteria)
     }
 
     /// Self-contained description of one option (the model never sees the question id or menu numbers).
@@ -260,7 +273,7 @@ public enum DecisionPrompt {
 
     // MARK: State
 
-    public static func state(for ctx: DecisionContext, includeSummary: Bool) -> JSONValue {
+    public static func state(for ctx: DecisionContext, includeSummary: Bool, enhanced: Bool = false) -> JSONValue {
         let s = ctx.state, me = ctx.seat, opp = 1 - ctx.seat
         let toCall = ctx.legal?.toCall ?? 0
         let effective = min(s.stacks[me], s.stacks[opp] + max(0, s.streetContrib[opp] - s.streetContrib[me]))
@@ -303,11 +316,24 @@ public enum DecisionPrompt {
                 obj["hero_made_hand"] = .string(v.category)
             }
             obj["board_texture"] = .string(texture(s.board))
+            if enhanced, let n = nutRanking(hole: hole, board: s.board) { obj["nut_ranking"] = .string(n.text); obj["holdings_that_beat_hero_now"] = .number(Double(n.beatenBy)) }
         }
         if includeSummary, let sum = ctx.matchSummary, !sum.isEmpty {
             obj["opponent_stats"] = .string(sum.replacingOccurrences(of: "\n", with: " "))
         }
         return .object(obj)
+    }
+
+    /// Exact count of opponent holdings that beat hero right now (pure card arithmetic).
+    static func nutRanking(hole: [Card], board: [Card]) -> (beatenBy: Int, text: String)? {
+        guard hole.count == 2, board.count >= 3 else { return nil }
+        let dead = Set(hole + board)
+        let opps = Combo.all.filter { !dead.contains($0.high) && !dead.contains($0.low) }
+        guard let v = try? GTOCore.evaluate([hole + board] + opps.map { $0.cards + board }), let h = v.first else { return nil }
+        let better = v.dropFirst().filter { $0 > h }.count
+        if better == 0 { return (0, "hero holds the nuts right now (no holding beats it)") }
+        let pct = 100.0 * Double(better) / Double(max(1, opps.count))
+        return (better, "\(better) of \(opps.count) possible opponent holdings (\(String(format: "%.1f", pct))%) beat hero right now")
     }
 
     public static func compactJSON(_ v: JSONValue) -> String {
