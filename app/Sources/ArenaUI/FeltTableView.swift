@@ -233,7 +233,7 @@ struct PlayerPlate: View {
             if snapshot.thinking == player {
                 HStack(spacing: 6) {
                     ThinkingDots()
-                    Text(spec.kind == .llm ? "Thinking" : "Deciding").font(.caption.weight(.medium))
+                    Text("Deciding").font(.caption.weight(.medium))
                 }
                 .foregroundStyle(.white.opacity(0.85))
                 .padding(.horizontal, 10).padding(.vertical, 5)

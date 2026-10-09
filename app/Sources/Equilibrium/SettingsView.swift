@@ -1,5 +1,5 @@
 import DesignSystem
-import LLMKit
+import OpenRouterKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -31,7 +31,7 @@ struct SettingsView: View {
             } header: {
                 Text("OpenRouter")
             } footer: {
-                Text("Used for LLM benchmarks and arena matches. Stored in your login keychain; never written to disk in plain text.")
+                Text("Used to call OpenRouter decision models in benchmarks and arena matches. Stored in your login keychain; never written to disk in plain text.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -51,8 +51,8 @@ struct SettingsView: View {
         if !key.isEmpty { APIKeyStore.save(key) }
         do {
             let client = try OpenRouterClient.fromStoredKey()
-            let models = try await client.models()
-            status = "Connected · \(models.count) models available"
+            let models = try await client.decisionModels()
+            status = "Connected · \(models.count) decision models available"
         } catch {
             status = error.localizedDescription
         }

@@ -161,11 +161,11 @@ struct StatsComparison: View {
                 row("C-bet", pct(a.cbet), pct(b.cbet), help: "Bet the flop as preflop aggressor")
                 row("Fold to c-bet", pct(a.foldToCbet), pct(b.foldToCbet))
                 row("Decisions", "\(a.decisions)", "\(b.decisions)")
-                row("Invalid actions", "\(a.invalidActions)", "\(b.invalidActions)", help: "Unparseable or failed answers, defaulted to check/fold")
+                row("Invalid actions", "\(a.invalidActions)", "\(b.invalidActions)", help: "Failed or unusable decisions, defaulted to check/fold")
                 if a.cost + b.cost > 0 || a.avgLatency != nil || b.avgLatency != nil {
                     row("Cost", Fmt.usd(a.cost), Fmt.usd(b.cost))
                     row("Avg latency", a.avgLatency.map { Fmt.duration($0) } ?? "–", b.avgLatency.map { Fmt.duration($0) } ?? "–")
-                    row("Tokens in / out", "\(a.promptTokens) / \(a.completionTokens)", "\(b.promptTokens) / \(b.completionTokens)")
+                    row("Input tokens", "\(a.promptTokens)", "\(b.promptTokens)")
                 }
             }
             .font(.callout.monospacedDigit())
@@ -292,22 +292,13 @@ struct HandReplayView: View {
                             .font(.caption).foregroundStyle(Theme.negative)
                     }
                     if m.latency > 0 || m.cost > 0 {
-                        Text(m.decision != nil
-                             ? "\(Fmt.duration(m.latency)) · \(m.promptTokens) input tokens · \(Fmt.usd(m.cost))"
-                             : "\(Fmt.duration(m.latency)) · \(m.promptTokens)/\(m.completionTokens) tokens · \(Fmt.usd(m.cost))")
+                        Text("\(Fmt.duration(m.latency)) · \(m.promptTokens) input tokens · \(Fmt.usd(m.cost))")
                             .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                     }
                     if let st = m.decision?.state, !st.isEmpty { DecisionStateDisclosure(state: st) }
                     if !m.raw.isEmpty {
                         DisclosureGroup("Raw response\(m.raw.count > 1 ? "s (\(m.raw.count))" : "")") {
                             Text(m.raw.joined(separator: "\n\n— retry —\n\n")).font(.caption.monospaced()).textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .font(.caption)
-                    }
-                    if let t = m.thinking, !t.isEmpty {
-                        DisclosureGroup("Hidden reasoning") {
-                            Text(t).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .font(.caption)

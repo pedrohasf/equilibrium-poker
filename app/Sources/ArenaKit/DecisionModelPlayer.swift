@@ -1,5 +1,5 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 import SolverKit
 
 // MARK: - Trace stored with every decision-model action

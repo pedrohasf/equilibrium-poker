@@ -1,6 +1,6 @@
 import ArenaKit
 import Foundation
-import LLMKit
+import OpenRouterKit
 import Observation
 import SolverKit
 
@@ -60,8 +60,8 @@ final class LiveMatch {
     var points: [CumulativePoint] = []
     var progress: MatchProgress?
     var record: MatchRecord?
-    /// Last reasoning text per player (0 = A, 1 = B).
-    var reasoning: [Int: (hand: Int, text: String, thinking: String?)] = [:]
+    /// Last bot rationale per player (0 = A, 1 = B).
+    var rationale: [Int: (hand: Int, text: String)] = [:]
     /// Last decision-model probability vector per player.
     var decisions: [Int: (hand: Int, trace: DecisionTrace, fallback: Bool)] = [:]
     var speed: PlaySpeed {
@@ -151,8 +151,8 @@ final class LiveMatch {
             }
             if let t = record.meta?.decision {
                 decisions[player] = (hand, t, record.meta?.fallback == true)
-            } else if let r = record.meta?.reasoning, !r.isEmpty, specs[player].kind == .llm || feature(hand) {
-                reasoning[player] = (hand, r, record.meta?.thinking)
+            } else if let r = record.meta?.reasoning, !r.isEmpty, feature(hand) {
+                rationale[player] = (hand, r)
             }
             var detail: String? = specs[player].usesOpenRouter ? record.meta?.reasoning : nil
             if let m = record.meta, m.fallback { detail = "Invalid / failed decision → \(record.kind.rawValue). \(m.errorMessage ?? "")" }
@@ -239,6 +239,7 @@ final class ArenaStore {
     var matches: [MatchRecord] = []
     var leaderboard: [LeaderboardEntry] = []
     var live: LiveMatch?
+    /// System One decision models in the live OpenRouter catalog.
     var catalog: [ModelInfo] = []
     var catalogError: String?
     var loadingCatalog = false
@@ -262,7 +263,7 @@ final class ArenaStore {
         loadingCatalog = true
         defer { loadingCatalog = false }
         do {
-            catalog = try await OpenRouterClient.fromStoredKey().models().sorted { $0.id < $1.id }
+            catalog = try await OpenRouterClient.fromStoredKey().decisionModels().sorted { $0.id < $1.id }
             catalogError = nil
         } catch {
             catalogError = error.localizedDescription
@@ -271,11 +272,7 @@ final class ArenaStore {
 
     func price(for model: String) -> ModelInfo? { catalog.first { $0.id == model } }
 
-    /// Chat (text-output) models in the live catalog.
-    var chatCatalog: [ModelInfo] { catalog.filter { !$0.isDecisionModel } }
-    /// System One decision models in the live catalog.
-    var decisionCatalog: [ModelInfo] { catalog.filter(\.isDecisionModel) }
-    var decisionIDs: Set<String> { Set(decisionCatalog.map(\.id)) }
+    var decisionIDs: Set<String> { Set(catalog.map(\.id)) }
 
     /// Suggested decision models that exist in the live catalog (all suggestions while it is not loaded).
     var suggestedDecisionModels: [String] {
@@ -286,8 +283,7 @@ final class ArenaStore {
     func start(config: MatchConfig, specs: [PlayerSpec], speed: PlaySpeed) throws {
         let needsKey = specs.contains { $0.usesOpenRouter }
         let client: OpenRouterClient? = needsKey ? try OpenRouterClient.fromStoredKey(maxConcurrent: max(4, config.concurrency * 2)) : nil
-        let options = LLMPlayer.Options(includeMatchSummary: config.opponentStats)
-        let players = try specs.map { try PlayerFactory.make($0, chat: client, decisions: client, options: options) }
+        let players = try specs.map { try PlayerFactory.make($0, decisions: client, includeMatchSummary: config.opponentStats) }
         live?.cancel()
         live = LiveMatch(config: config, specs: specs, players: players, speed: speed) { [weak self] _ in
             self?.reload()
@@ -297,21 +293,10 @@ final class ArenaStore {
 
 /// Rough cost estimate for a match.
 enum CostEstimate {
-    /// Average decisions per player per hand (measured from bot matches) and token budgets.
+    /// Average decisions per player per hand (measured from bot matches).
     static let decisionsPerHand = 1.9
-    static let promptTokens = 750.0
     /// Decision models: JSON state + criteria (input only; output is free).
     static let decisionPromptTokens = 1100.0
-
-    static func completionTokens(effort: String?) -> Double {
-        switch effort {
-        case "minimal": return 250
-        case "low": return 700
-        case "medium": return 1800
-        case "high": return 4500
-        default: return 1200
-        }
-    }
 
     /// USD estimate for one player's side, nil when pricing is unknown.
     static func usd(spec: PlayerSpec, hands: Int, info: ModelInfo?) -> Double? {
@@ -321,9 +306,6 @@ enum CostEstimate {
         case .decision:
             guard let info, let pin = info.promptPrice else { return nil }
             return calls * decisionPromptTokens * pin
-        case .llm: break
         }
-        guard let info, let pin = info.promptPrice, let pout = info.completionPrice else { return nil }
-        return calls * (promptTokens * pin + completionTokens(effort: spec.reasoningEffort) * pout)
     }
 }

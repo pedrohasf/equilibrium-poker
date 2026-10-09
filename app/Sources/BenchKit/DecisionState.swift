@@ -1,5 +1,5 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 import SolverKit
 
 /// Builds the `state` + `choice` question sent to OpenRouter System One decision models.
@@ -233,6 +233,20 @@ public enum DecisionStateBuilder {
     static let suitNames = ["clubs", "diamonds", "hearts", "spades"]
 
     static func spell(_ c: Card) -> String { "\(rankNames[c.rank.rawValue]) of \(suitNames[c.suit.rawValue])" }
+}
+
+/// Pre-run cost estimate. Decision models bill input tokens only (output is free).
+public enum CostEstimator {
+    public struct Estimate: Sendable, Hashable {
+        public var promptTokens: Int
+        /// nil when the model's input price is unknown.
+        public var usd: Double?
+    }
+
+    public static func estimate(decisions: [Decision], promptPrice: Double?) -> Estimate {
+        let p = decisions.reduce(0) { $0 + DecisionStateBuilder.estimatedInputTokens($1) }
+        return Estimate(promptTokens: p, usd: promptPrice.map { Double(p) * $0 })
+    }
 }
 
 /// Exact, cheap facts about hero's hand on the board (made hand, draws, texture).

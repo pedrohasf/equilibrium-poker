@@ -1,5 +1,5 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 import SolverKit
 
 // MARK: - Deterministic RNG

@@ -1,84 +1,14 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 import SolverKit
 
-/// Anything that can answer benchmark decisions: an LLM or a reference bot.
+/// Anything that can answer benchmark decisions: a decision model or a reference bot.
 public protocol DecisionMaker: Sendable {
     /// Stable id: OpenRouter model id or "baseline:<name>".
     var id: String { get }
     var displayName: String { get }
     var kind: PlayerKind { get }
-    var options: ChatOptions? { get }
     func decide(_ decision: Decision) async throws -> DecisionResult
-}
-
-public extension DecisionMaker {
-    var options: ChatOptions? { nil }
-}
-
-// MARK: - LLM
-
-/// Asks an OpenRouter model. Network/API failures and unparseable replies become invalid answers
-/// (scored as the worst legal action) rather than aborting the run; cancellation propagates.
-public struct LLMDecisionMaker: DecisionMaker {
-    public let model: String
-    public let client: OpenRouterClient
-    public let chatOptions: ChatOptions
-    /// Ask once more for bare JSON when the first reply can't be parsed.
-    public var repairAttempt: Bool
-
-    public init(model: String, client: OpenRouterClient, options: ChatOptions = .init(), repairAttempt: Bool = true) {
-        self.model = model
-        self.client = client
-        self.chatOptions = options
-        self.repairAttempt = repairAttempt
-    }
-
-    public var id: String { model }
-    public var displayName: String { model }
-    public var kind: PlayerKind { .llm }
-    public var options: ChatOptions? { chatOptions }
-
-    public func decide(_ d: Decision) async throws -> DecisionResult {
-        var messages = PromptBuilder.messages(d)
-        var usage = ChatUsage()
-        var latency = 0.0
-        var raw = ""
-        var reasoning: String?
-        do {
-            let r = try await client.chat(model: model, messages: messages, options: chatOptions)
-            usage = usage + r.usage
-            latency += r.latency
-            raw = r.content
-            reasoning = r.reasoning
-            var choice = ResponseParser.parse(r.content, actions: d.actions)
-            // Some reasoning models put the final answer only in the reasoning channel.
-            if choice == nil, r.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let rs = r.reasoning {
-                choice = ResponseParser.parse(rs, actions: d.actions)
-            }
-            if choice == nil && repairAttempt {
-                messages.append(.assistant(r.content))
-                messages.append(.user(PromptBuilder.repair(d)))
-                let r2 = try await client.chat(model: model, messages: messages, options: chatOptions)
-                usage = usage + r2.usage
-                latency += r2.latency
-                raw += "\n\n[repair] " + r2.content
-                choice = ResponseParser.parse(r2.content, actions: d.actions)
-            }
-            return DecisionResult(decisionId: d.id, choice: choice, rawResponse: raw, reasoning: reasoning,
-                                  error: choice == nil ? "Could not parse an action from the reply" : nil,
-                                  latency: latency, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
-                                  reasoningTokens: usage.reasoningTokens, cost: usage.cost)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let e as URLError where e.code == .cancelled {
-            throw CancellationError()
-        } catch {
-            return DecisionResult(decisionId: d.id, choice: nil, rawResponse: raw.isEmpty ? nil : raw, reasoning: reasoning,
-                                  error: error.localizedDescription, latency: latency, promptTokens: usage.promptTokens,
-                                  completionTokens: usage.completionTokens, reasoningTokens: usage.reasoningTokens, cost: usage.cost)
-        }
-    }
 }
 
 // MARK: - Decision models

@@ -13,7 +13,7 @@ struct LiveMatchView: View {
                     header
                     FeltTableView(snapshot: live.table, specs: live.specs, caption: caption)
                         .frame(height: 500)
-                    ReasoningPanel(live: live)
+                    DecisionsPanel(live: live)
                     Panel {
                         CumulativeChart(points: live.points, playerName: live.name(0), totalHands: live.config.totalHands)
                             .frame(height: 220)
@@ -146,8 +146,8 @@ struct StatusBadge: View {
     }
 }
 
-/// Latest reasoning from each player, expandable to the full text and hidden reasoning.
-struct ReasoningPanel: View {
+/// Latest decision from each player: decision-model action probabilities, or the bot's rationale.
+struct DecisionsPanel: View {
     let live: LiveMatch
     @State private var expanded = true
 
@@ -159,7 +159,7 @@ struct ReasoningPanel: View {
                 }
                 .padding(.top, 8)
             } label: {
-                Label(live.specs.contains { $0.kind == .decision } ? "Thinking & decisions" : "Thinking", systemImage: "brain").font(.headline)
+                Label("Decisions", systemImage: "chart.bar.xaxis").font(.headline)
             }
         }
     }
@@ -173,7 +173,7 @@ struct ReasoningPanel: View {
                 Spacer()
                 if live.specs[p].kind == .decision, let d = live.decisions[p] {
                     Text("hand #\(d.hand)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                } else if let r = live.reasoning[p] { Text("hand #\(r.hand)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                } else if let r = live.rationale[p] { Text("hand #\(r.hand)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
             }
             if live.specs[p].kind == .decision {
                 Group {
@@ -187,24 +187,14 @@ struct ReasoningPanel: View {
                 }
                 .frame(minHeight: 96, alignment: .top)
             } else {
-            ScrollView {
-                Text(live.reasoning[p]?.text ?? (live.specs[p].kind == .llm ? "No reasoning yet." : "Bot rationale appears here."))
-                    .font(.callout)
-                    .foregroundStyle(live.reasoning[p] == nil ? .secondary : .primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(height: 96)
-            }
-            if let t = live.reasoning[p]?.thinking, !t.isEmpty, live.specs[p].kind != .decision {
-                DisclosureGroup("Hidden reasoning") {
-                    ScrollView {
-                        Text(t).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 160)
+                ScrollView {
+                    Text(live.rationale[p]?.text ?? "Bot rationale appears here.")
+                        .font(.callout)
+                        .foregroundStyle(live.rationale[p] == nil ? .secondary : .primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .font(.caption)
+                .frame(height: 96)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

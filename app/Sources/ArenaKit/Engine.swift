@@ -112,12 +112,10 @@ public struct ArenaAction: Codable, Hashable, Sendable, CustomStringConvertible 
     }
 }
 
-/// Metadata about how a decision was produced (LLM reasoning, cost, errors...).
+/// Metadata about how a decision was produced (probabilities, rationale, cost, errors...).
 public struct DecisionMeta: Codable, Hashable, Sendable {
-    /// Short reasoning shown in the UI (model text before the JSON, or a bot's rationale).
+    /// Short rationale shown in the UI (a bot's reasoning, or a decision model's probability summary).
     public var reasoning: String?
-    /// Provider-exposed hidden reasoning, if any.
-    public var thinking: String?
     /// Raw model responses (one per attempt).
     public var raw: [String]
     /// 1-based menu choice as returned by the player.
@@ -125,7 +123,6 @@ public struct DecisionMeta: Codable, Hashable, Sendable {
     public var latency: Double
     public var promptTokens: Int
     public var completionTokens: Int
-    public var reasoningTokens: Int
     public var cost: Double
     /// Parse failures / API errors encountered while producing this decision.
     public var errors: Int
@@ -135,18 +132,16 @@ public struct DecisionMeta: Codable, Hashable, Sendable {
     /// Decision-model players: the probability vector over the action menu and the state sent.
     public var decision: DecisionTrace?
 
-    public init(reasoning: String? = nil, thinking: String? = nil, raw: [String] = [], menuChoice: Int? = nil, latency: Double = 0,
-                promptTokens: Int = 0, completionTokens: Int = 0, reasoningTokens: Int = 0, cost: Double = 0,
+    public init(reasoning: String? = nil, raw: [String] = [], menuChoice: Int? = nil, latency: Double = 0,
+                promptTokens: Int = 0, completionTokens: Int = 0, cost: Double = 0,
                 errors: Int = 0, fallback: Bool = false, errorMessage: String? = nil, decision: DecisionTrace? = nil) {
         self.decision = decision
         self.reasoning = reasoning
-        self.thinking = thinking
         self.raw = raw
         self.menuChoice = menuChoice
         self.latency = latency
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
-        self.reasoningTokens = reasoningTokens
         self.cost = cost
         self.errors = errors
         self.fallback = fallback

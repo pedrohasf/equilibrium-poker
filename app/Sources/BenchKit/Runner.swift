@@ -1,5 +1,5 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 
 // MARK: - Persistence
 
@@ -177,9 +177,9 @@ public enum BenchmarkRunner {
         let decisions = Array(suite.decisions.prefix(limit ?? suite.decisions.count))
         var recorders: [RunRecorder] = []
         for p in players {
-            let id = BenchmarkRun.makeId(suiteId: suite.id, model: p.id, options: p.options)
+            let id = BenchmarkRun.makeId(suiteId: suite.id, model: p.id)
             var run = (resume ? BenchStore.loadRun(id: id) : nil)
-                ?? BenchmarkRun(suiteId: suite.id, model: p.id, displayName: p.displayName, kind: p.kind, options: p.options)
+                ?? BenchmarkRun(suiteId: suite.id, model: p.id, displayName: p.displayName, kind: p.kind)
             if !resume { run.results = [] }
             let rec = RunRecorder(run: run, suite: suite, persist: persist)
             recorders.append(rec)

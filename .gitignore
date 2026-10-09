@@ -4,3 +4,4 @@
 /app/.swiftpm/
 /build/
 *.xcodeproj/xcuserdata/
+.env

@@ -1,11 +1,11 @@
 import AppKit
 import BenchKit
 import DesignSystem
-import LLMKit
+import OpenRouterKit
 import SolverKit
 import SwiftUI
 
-/// Root of the LLM Benchmarks section: suites on the left, the selected suite's lab on the right.
+/// Root of the decision-model benchmark section: suites on the left, the selected suite's lab on the right.
 public struct BenchmarkHomeView: View {
     @State private var model = BenchLabModel()
 
@@ -28,7 +28,7 @@ public struct BenchmarkHomeView: View {
                     ContentUnavailableView {
                         Label("No benchmark suite", systemImage: "square.stack.3d.up.slash")
                     } description: {
-                        Text("A suite is a fixed set of solved decisions. Generate one, then run models and baselines against it.")
+                        Text("A suite is a fixed set of solved decisions. Generate one, then run decision models and baselines against it.")
                     } actions: {
                         Button("Generate Suite…") { model.showGenerateSheet = true }
                             .buttonStyle(.glassProminent)
@@ -77,9 +77,9 @@ public struct BenchmarkHomeView: View {
                     Button {
                         model.tab = .run
                     } label: {
-                        Label("Run Models", systemImage: "play.fill")
+                        Label("Run Decision Models", systemImage: "play.fill")
                     }
-                    .help("Pick models and run the benchmark (⌘R)")
+                    .help("Pick decision models and run the benchmark (⌘R)")
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(model.suite == nil)
                 }

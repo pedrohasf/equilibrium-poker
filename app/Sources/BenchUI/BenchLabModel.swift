@@ -1,6 +1,6 @@
 import BenchKit
 import Foundation
-import LLMKit
+import OpenRouterKit
 import Observation
 import SolverKit
 
@@ -25,14 +25,7 @@ enum BenchTab: String, CaseIterable, Identifiable {
     }
 }
 
-/// The two kinds of API players the Run tab can pick from.
-enum ModelGroup: String, CaseIterable, Identifiable {
-    case decision, chat
-    var id: String { rawValue }
-    var title: String { self == .decision ? "Decision models" : "Chat LLMs" }
-}
-
-/// Persisted decision-model roster (kept in BenchUI; LLMKit's `ModelRoster` holds chat models).
+/// Persisted decision-model roster.
 enum DecisionModelRoster {
     private static let key = "decisionModelRoster"
     static var saved: [String] {
@@ -66,18 +59,13 @@ final class BenchLabModel {
     private var generationTask: Task<Void, Never>?
 
     // Models & options
+    /// Live OpenRouter decision-model catalog.
     var catalog: [ModelInfo] = []
     var catalogState: CatalogState = .idle
-    var roster: [String] = ModelRoster.saved {
-        didSet { ModelRoster.saved = roster }
+    var roster: [String] = DecisionModelRoster.saved {
+        didSet { DecisionModelRoster.saved = roster }
     }
-    var decisionRoster: [String] = DecisionModelRoster.saved {
-        didSet { DecisionModelRoster.saved = decisionRoster }
-    }
-    /// Which roster the Run tab shows; decision models are the benchmark's focus.
-    var modelGroup: ModelGroup = .decision
     var selectedModels: Set<String> = []
-    var reasoningEffort: String?
     var concurrency = 8
     var decisionLimit: Int?
 
@@ -117,36 +105,21 @@ final class BenchLabModel {
 
     func modelInfo(_ id: String) -> ModelInfo? { catalog.first { $0.id == id } }
 
-    var decisionCatalog: [ModelInfo] { catalog.filter(\.isDecisionModel) }
-
-    /// Decision model if the live catalog says so; otherwise if it's on the decision roster.
-    func isDecisionModel(_ id: String) -> Bool {
-        modelInfo(id)?.isDecisionModel ?? decisionRoster.contains(id)
-    }
-
-    /// Decision roster filtered by the live catalog once it's loaded (all entries before that).
-    var visibleDecisionRoster: [String] {
-        guard catalogState == .loaded, !decisionCatalog.isEmpty else { return decisionRoster }
-        return decisionRoster.filter { modelInfo($0)?.isDecisionModel == true }
+    /// Roster filtered by the live catalog once it's loaded (all entries before that).
+    var visibleRoster: [String] {
+        guard catalogState == .loaded, !catalog.isEmpty else { return roster }
+        return roster.filter { modelInfo($0) != nil }
     }
 
     /// Roster entries hidden because the live catalog doesn't list them.
-    var missingDecisionModels: [String] { decisionRoster.filter { !visibleDecisionRoster.contains($0) } }
-
-    func roster(for group: ModelGroup) -> [String] { group == .decision ? visibleDecisionRoster : roster }
-
-    func options(for id: String) -> ChatOptions? { isDecisionModel(id) ? nil : chatOptions }
+    var missingModels: [String] { roster.filter { !visibleRoster.contains($0) } }
 
     func runId(for id: String, suite: BenchmarkSuite) -> String {
-        BenchmarkRun.makeId(suiteId: suite.id, model: id, options: options(for: id))
+        BenchmarkRun.makeId(suiteId: suite.id, model: id)
     }
 
-    /// Selected ids in display order (decision models first).
-    var selectedInOrder: [String] {
-        (visibleDecisionRoster + roster.filter { !visibleDecisionRoster.contains($0) }).filter(selectedModels.contains)
-    }
-
-    var selectedChatCount: Int { selectedInOrder.filter { !isDecisionModel($0) }.count }
+    /// Selected ids in roster order (only those still in the live catalog).
+    var selectedInOrder: [String] { visibleRoster.filter(selectedModels.contains) }
 
     func loadCatalog(force: Bool = false) async {
         guard hasKey else { return }
@@ -154,7 +127,7 @@ final class BenchLabModel {
         catalogState = .loading
         do {
             let client = try OpenRouterClient.fromStoredKey()
-            catalog = try await client.models().sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            catalog = try await client.decisionModels().sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             catalogState = .loaded
         } catch {
             catalogState = .failed(error.localizedDescription)
@@ -210,23 +183,14 @@ final class BenchLabModel {
         let runId = runId(for: model, suite: s)
         let done = runs.first { $0.id == runId }?.answeredIds ?? []
         let todo = Array(s.decisions.prefix(decisionLimit ?? s.decisions.count)).filter { !done.contains($0.id) }
-        let info = modelInfo(model)
-        if isDecisionModel(model) { return CostEstimator.decisionEstimate(decisions: todo, promptPrice: info?.promptPrice) }
-        return CostEstimator.estimate(decisions: todo, promptPrice: info?.promptPrice, completionPrice: info?.completionPrice,
-                                      reasoningEffort: reasoningEffort)
+        return CostEstimator.estimate(decisions: todo, promptPrice: modelInfo(model)?.promptPrice)
     }
 
-    var chatOptions: ChatOptions { ChatOptions(reasoningEffort: reasoningEffort) }
-
     func startModels() {
-        guard let s = suite, !selectedModels.isEmpty else { return }
+        guard let s = suite, !selectedInOrder.isEmpty else { return }
         do {
             let client = try OpenRouterClient.fromStoredKey(maxConcurrent: concurrency)
-            let opts = chatOptions
-            let players: [any DecisionMaker] = selectedInOrder.map { id -> any DecisionMaker in
-                isDecisionModel(id) ? DecisionModelMaker(model: id, provider: client) : LLMDecisionMaker(model: id, client: client, options: opts)
-            }
-            start(players, suite: s)
+            start(selectedInOrder.map { DecisionModelMaker(model: $0, provider: client) }, suite: s)
         } catch {
             runError = error.localizedDescription
         }
@@ -242,7 +206,7 @@ final class BenchLabModel {
         running = true
         runError = nil
         live = [:]
-        liveOrder = players.map { BenchmarkRun.makeId(suiteId: suite.id, model: $0.id, options: $0.options) }
+        liveOrder = players.map { BenchmarkRun.makeId(suiteId: suite.id, model: $0.id) }
         tab = players.allSatisfy({ $0.kind == .baseline }) ? tab : .run
         let limit = decisionLimit
         let concurrency = concurrency
@@ -275,19 +239,14 @@ final class BenchLabModel {
     // MARK: Roster
 
     func addToRoster(_ id: String) {
-        if modelInfo(id)?.isDecisionModel == true {
-            if !decisionRoster.contains(id) { decisionRoster.append(id) }
-        } else if !roster.contains(id) {
-            roster.append(id)
-        }
+        if !roster.contains(id) { roster.append(id) }
         selectedModels.insert(id)
     }
 
     func removeFromRoster(_ id: String) {
         roster.removeAll { $0 == id }
-        decisionRoster.removeAll { $0 == id }
         selectedModels.remove(id)
     }
 
-    func isOnRoster(_ id: String) -> Bool { roster.contains(id) || decisionRoster.contains(id) }
+    func isOnRoster(_ id: String) -> Bool { roster.contains(id) }
 }

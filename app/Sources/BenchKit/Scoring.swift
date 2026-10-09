@@ -80,7 +80,6 @@ public struct ModelScore: Codable, Hashable, Sendable, Identifiable {
     public var totalCost: Double
     public var promptTokens: Int
     public var completionTokens: Int
-    public var reasoningTokens: Int
 
     public var isComplete: Bool { answered >= total }
     public var totalTokens: Int { promptTokens + completionTokens }
@@ -232,8 +231,7 @@ public enum Scoring {
                           meanLatency: latencies.isEmpty ? 0 : latencies.reduce(0, +) / Double(latencies.count),
                           totalCost: results.reduce(0) { $0 + $1.cost },
                           promptTokens: results.reduce(0) { $0 + $1.promptTokens },
-                          completionTokens: results.reduce(0) { $0 + $1.completionTokens },
-                          reasoningTokens: results.reduce(0) { $0 + $1.reasoningTokens })
+                          completionTokens: results.reduce(0) { $0 + $1.completionTokens })
     }
 
     /// Rows sorted by GTO score (desc), then EV loss (asc).

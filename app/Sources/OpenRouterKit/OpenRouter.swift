@@ -57,38 +57,7 @@ public enum APIKeyStore {
 
 // MARK: - Models
 
-public struct ChatMessage: Codable, Hashable, Sendable {
-    public enum Role: String, Codable, Sendable { case system, user, assistant }
-    public var role: Role
-    public var content: String
-
-    public init(_ role: Role, _ content: String) {
-        self.role = role
-        self.content = content
-    }
-
-    public static func system(_ s: String) -> ChatMessage { .init(.system, s) }
-    public static func user(_ s: String) -> ChatMessage { .init(.user, s) }
-    public static func assistant(_ s: String) -> ChatMessage { .init(.assistant, s) }
-}
-
-public struct ChatOptions: Codable, Hashable, Sendable {
-    public var temperature: Double?
-    public var maxTokens: Int?
-    /// OpenRouter unified reasoning effort: "minimal", "low", "medium", "high" (nil = provider default).
-    public var reasoningEffort: String?
-    /// Ask the provider for a JSON object response when supported.
-    public var jsonMode: Bool
-
-    public init(temperature: Double? = nil, maxTokens: Int? = nil, reasoningEffort: String? = nil, jsonMode: Bool = false) {
-        self.temperature = temperature
-        self.maxTokens = maxTokens
-        self.reasoningEffort = reasoningEffort
-        self.jsonMode = jsonMode
-    }
-}
-
-public struct ChatUsage: Codable, Hashable, Sendable {
+public struct APIUsage: Codable, Hashable, Sendable {
     public var promptTokens: Int
     public var completionTokens: Int
     public var reasoningTokens: Int
@@ -102,32 +71,12 @@ public struct ChatUsage: Codable, Hashable, Sendable {
         self.cost = cost
     }
 
-    public static func + (a: ChatUsage, b: ChatUsage) -> ChatUsage {
-        ChatUsage(promptTokens: a.promptTokens + b.promptTokens, completionTokens: a.completionTokens + b.completionTokens,
+    public static func + (a: APIUsage, b: APIUsage) -> APIUsage {
+        APIUsage(promptTokens: a.promptTokens + b.promptTokens, completionTokens: a.completionTokens + b.completionTokens,
                   reasoningTokens: a.reasoningTokens + b.reasoningTokens, cost: a.cost + b.cost)
     }
 }
 
-public struct ChatResult: Codable, Hashable, Sendable {
-    public var model: String
-    public var content: String
-    /// Provider-exposed reasoning text, if any.
-    public var reasoning: String?
-    public var usage: ChatUsage
-    /// Wall-clock seconds for the request (including retries).
-    public var latency: Double
-    public var finishReason: String?
-
-    public init(model: String, content: String, reasoning: String? = nil, usage: ChatUsage = .init(), latency: Double = 0,
-                finishReason: String? = nil) {
-        self.model = model
-        self.content = content
-        self.reasoning = reasoning
-        self.usage = usage
-        self.latency = latency
-        self.finishReason = finishReason
-    }
-}
 
 public struct ModelInfo: Codable, Hashable, Sendable, Identifiable {
     public var id: String
@@ -159,7 +108,7 @@ public struct OpenRouterError: LocalizedError, Sendable {
 
 // MARK: - Client
 
-/// Minimal OpenRouter chat-completions client with retries and a concurrency cap.
+/// Minimal OpenRouter client (model catalog + System One decisions) with retries and a concurrency cap.
 public actor OpenRouterClient {
     public static let baseURL = URL(string: "https://openrouter.ai/api/v1")!
 
@@ -258,41 +207,6 @@ public actor OpenRouterClient {
         }
     }
 
-    public func chat(model: String, messages: [ChatMessage], options: ChatOptions = .init()) async throws -> ChatResult {
-        await acquire()
-        defer { release() }
-
-        var body: [String: Any] = [
-            "model": model,
-            "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
-            "usage": ["include": true],
-        ]
-        if let t = options.temperature { body["temperature"] = t }
-        if let m = options.maxTokens { body["max_tokens"] = m }
-        if let e = options.reasoningEffort { body["reasoning"] = ["effort": e] }
-        if options.jsonMode { body["response_format"] = ["type": "json_object"] }
-        let payload = try JSONSerialization.data(withJSONObject: body)
-
-        let start = Date()
-        var attempt = 0
-        while true {
-            do {
-                let (data, resp) = try await session.data(for: request("chat/completions", body: payload))
-                try Self.check(resp, data)
-                var result = try Self.parseChat(data, model: model)
-                result.latency = Date().timeIntervalSince(start)
-                return result
-            } catch let e as OpenRouterError where e.retryable && attempt < maxRetries {
-                attempt += 1
-            } catch let e as URLError where attempt < maxRetries && e.code != .cancelled {
-                attempt += 1
-            }
-            try Task.checkCancellation()
-            let backoff = min(30, pow(2, Double(attempt))) + Double.random(in: 0...1)
-            try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
-        }
-    }
-
     static func check(_ resp: URLResponse, _ data: Data) throws {
         guard let http = resp as? HTTPURLResponse else { return }
         if (200..<300).contains(http.statusCode) {
@@ -313,83 +227,8 @@ public actor OpenRouterClient {
         throw OpenRouterError(status: http.statusCode, message: message, retryable: retryable)
     }
 
-    private static func parseChat(_ data: Data, model: String) throws -> ChatResult {
-        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = obj["choices"] as? [[String: Any]], let first = choices.first else {
-            throw OpenRouterError(status: nil, message: "Empty completion", retryable: true)
-        }
-        let msg = first["message"] as? [String: Any]
-        let content = msg?["content"] as? String ?? ""
-        let reasoning = msg?["reasoning"] as? String
-        var usage = ChatUsage()
-        if let u = obj["usage"] as? [String: Any] {
-            usage.promptTokens = (u["prompt_tokens"] as? NSNumber)?.intValue ?? 0
-            usage.completionTokens = (u["completion_tokens"] as? NSNumber)?.intValue ?? 0
-            usage.cost = (u["cost"] as? NSNumber)?.doubleValue ?? 0
-            if let d = u["completion_tokens_details"] as? [String: Any] {
-                usage.reasoningTokens = (d["reasoning_tokens"] as? NSNumber)?.intValue ?? 0
-            }
-        }
-        if content.isEmpty && (reasoning ?? "").isEmpty {
-            throw OpenRouterError(status: nil, message: "Model returned an empty message", retryable: true)
-        }
-        return ChatResult(model: obj["model"] as? String ?? model, content: content, reasoning: reasoning, usage: usage,
-                          latency: 0, finishReason: first["finish_reason"] as? String)
-    }
 }
 
-// MARK: - Shared helpers
-
-public enum LLMParsing {
-    /// Extracts the last JSON object embedded in free text (handles ```json fences).
-    public static func lastJSONObject(in text: String) -> [String: Any]? {
-        let chars = Array(text)
-        var end = chars.count - 1
-        while end >= 0 {
-            guard let close = (0...end).last(where: { chars[$0] == "}" }) else { return nil }
-            var depth = 0
-            var i = close
-            while i >= 0 {
-                if chars[i] == "}" { depth += 1 }
-                if chars[i] == "{" {
-                    depth -= 1
-                    if depth == 0 {
-                        let s = String(chars[i...close])
-                        if let d = s.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                            return obj
-                        }
-                        break
-                    }
-                }
-                i -= 1
-            }
-            end = close - 1
-        }
-        return nil
-    }
-}
-
-/// Persisted list of models the user likes to benchmark.
-public enum ModelRoster {
-    /// Reasonable defaults; the UI validates them against the live /models catalog.
-    public static let suggested: [String] = [
-        "openai/gpt-5",
-        "anthropic/claude-sonnet-4.5",
-        "google/gemini-2.5-pro",
-        "x-ai/grok-4",
-        "deepseek/deepseek-chat-v3.1",
-        "qwen/qwen3-235b-a22b-2507",
-        "meta-llama/llama-4-maverick",
-        "openai/gpt-5-mini",
-    ]
-
-    private static let key = "modelRoster"
-
-    public static var saved: [String] {
-        get { UserDefaults.standard.stringArray(forKey: key) ?? suggested }
-        set { UserDefaults.standard.set(newValue, forKey: key) }
-    }
-}
 
 /// Where benchmark artefacts live: ~/Library/Application Support/Equilibrium/<sub>.
 public enum Storage {

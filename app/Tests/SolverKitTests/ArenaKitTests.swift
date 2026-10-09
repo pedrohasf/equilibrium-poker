@@ -1,5 +1,5 @@
 @testable import ArenaKit
-import LLMKit
+import OpenRouterKit
 import SolverKit
 import XCTest
 
@@ -225,89 +225,10 @@ final class ArenaKitTests: XCTestCase {
         XCTAssertTrue(m2.allSatisfy { t.isLegal($0.action) })
     }
 
-    // MARK: LLM player
-
-    struct MockChat: ChatProvider {
-        let replies: [String]
-        let counter = Counter()
-        final class Counter: @unchecked Sendable {
-            let lock = NSLock()
-            var n = 0
-            var prompts: [[ChatMessage]] = []
-        }
-
-        func complete(model: String, messages: [ChatMessage], options: ChatOptions) async throws -> LLMReply {
-            let i: Int = counter.lock.withLock {
-                counter.n += 1
-                counter.prompts.append(messages)
-                return counter.n - 1
-            }
-            return LLMReply(content: replies[min(i, replies.count - 1)], usage: ChatUsage(promptTokens: 100, completionTokens: 20, cost: 0.001), latency: 0.5)
-        }
-    }
+    // MARK: Helpers
 
     func context(_ s: HandState) -> DecisionContext {
         DecisionContext(state: s, seat: s.toAct!, menu: ActionMenu.build(for: s), handNumber: 1, rngSeed: 1)
-    }
-
-    func testParseChoice() {
-        XCTAssertEqual(LLMPrompt.parseChoice("I'll raise.\n{\"action\": 3}", optionCount: 6), 3)
-        XCTAssertEqual(LLMPrompt.parseChoice("```json\n{\"action\": \"2\"}\n```", optionCount: 6), 2)
-        XCTAssertEqual(LLMPrompt.parseChoice("{\"action\": 1} wait no {\"action\": 4}", optionCount: 6), 4)
-        XCTAssertEqual(LLMPrompt.parseChoice("action: 5", optionCount: 6), 5)
-        XCTAssertEqual(LLMPrompt.parseChoice("4", optionCount: 6), 4)
-        XCTAssertNil(LLMPrompt.parseChoice("{\"action\": 9}", optionCount: 6))
-        XCTAssertNil(LLMPrompt.parseChoice("I fold", optionCount: 6))
-        XCTAssertEqual(LLMPrompt.reasoningSnippet("Strong hand, raise.\n{\"action\": 3}"), "Strong hand, raise.")
-    }
-
-    func testLLMPlayerRetryThenSuccess() async throws {
-        let chat = MockChat(replies: ["I think raising is good", "{\"action\": 3}"])
-        let p = LLMPlayer(model: "test/model", client: chat)
-        let ctx = context(hand())
-        let d = try await p.decide(ctx)
-        XCTAssertEqual(d.action, .raise(250))
-        XCTAssertEqual(d.meta?.errors, 1)
-        XCTAssertEqual(d.meta?.fallback, false)
-        XCTAssertEqual(d.meta?.raw.count, 2)
-        XCTAssertEqual(d.meta?.cost ?? 0, 0.002, accuracy: 1e-12)
-        XCTAssertEqual(chat.counter.prompts.last?.count, 4, "corrective follow-up appended")
-        let prompt = chat.counter.prompts[0][1].content
-        XCTAssertTrue(prompt.contains("As Ah"))
-        XCTAssertTrue(prompt.contains("1. Fold"))
-        XCTAssertTrue(prompt.contains("3. Raise to 2.5 bb (2.5x)"))
-        XCTAssertTrue(prompt.contains("BTN/SB"))
-    }
-
-    func testLLMPlayerFallsBackToCheckFold() async throws {
-        let p = LLMPlayer(model: "test/model", client: MockChat(replies: ["no idea"]))
-        let d = try await p.decide(context(hand()))
-        XCTAssertEqual(d.action, .fold)
-        XCTAssertEqual(d.meta?.fallback, true)
-        XCTAssertEqual(d.meta?.errors, 2)
-
-        var s = hand()
-        try s.apply(.call)
-        let d2 = try await p.decide(context(s))
-        XCTAssertEqual(d2.action, .check, "defaults to check when checking is free")
-    }
-
-    func testLLMMatchCountsInvalidActions() async throws {
-        let bad = LLMPlayer(model: "test/bad", client: MockChat(replies: ["hmm"]))
-        let m = await MatchRunner.run(config: MatchConfig(deals: 3, seed: 1), specs: [.llm("test/bad"), .bot(.station)],
-                                      players: [bad, CallingStation()], save: false)
-        let s = try XCTUnwrap(m.summary)
-        XCTAssertEqual(m.status, .completed)
-        XCTAssertEqual(s.players[0].invalidActions, s.players[0].decisions)
-        XCTAssertGreaterThan(s.players[0].cost, 0)
-    }
-
-    func testHistoryPrompt() throws {
-        var s = hand()
-        try s.apply(.raise(250)); try s.apply(.call); try s.apply(.bet(200))
-        let h = LLMPrompt.history(s, seat: 0)
-        XCTAssertTrue(h.contains("Preflop: You (BTN/SB) post 0.5, Opponent (BB) posts 1, You raise to 2.5, Opponent calls 1.5."))
-        XCTAssertTrue(h.contains("Flop [2c 7d 9h]: Opponent bets 2."))
     }
 
     // MARK: Specs, stats, leaderboard
@@ -315,8 +236,7 @@ final class ArenaKitTests: XCTestCase {
     func testPlayerSpecParsing() {
         XCTAssertEqual(PlayerSpec.parse("bot:tag"), .bot(.tag))
         XCTAssertEqual(PlayerSpec.parse("random"), .bot(.random))
-        XCTAssertEqual(PlayerSpec.parse("openai/gpt-5@low"), .llm("openai/gpt-5", effort: "low"))
-        XCTAssertEqual(PlayerSpec.parse("openai/gpt-5@low")?.id, "openai/gpt-5@low")
+        XCTAssertNil(PlayerSpec.parse("openai/gpt-5@low"), "reasoning-effort suffixes (chat models) are gone")
         XCTAssertNil(PlayerSpec.parse("bot:nope"))
     }
 
@@ -401,7 +321,7 @@ final class ArenaKitTests: XCTestCase {
             let keys = criteria.keys.sorted()
             var answers: [String: DecisionAnswer] = [:]
             if let a = respond(keys, n) { answers[questions.keys.first!] = a }
-            return DecideResult(model: model, answers: answers, usage: ChatUsage(promptTokens: 400, cost: 0.0002), latency: 0.1, raw: "{}")
+            return DecideResult(model: model, answers: answers, usage: APIUsage(promptTokens: 400, cost: 0.0002), latency: 0.1, raw: "{}")
         }
     }
 
@@ -525,8 +445,8 @@ final class ArenaKitTests: XCTestCase {
         }
         let specs: [PlayerSpec] = [.decision("test/aggro"), .decision("test/calm", mode: .mixed)]
         let players: [any ArenaPlayer] = [
-            try PlayerFactory.make(specs[0], chat: nil, decisions: aggro),
-            try PlayerFactory.make(specs[1], chat: nil, decisions: calm),
+            try PlayerFactory.make(specs[0], decisions: aggro),
+            try PlayerFactory.make(specs[1], decisions: calm),
         ]
         let cfg = MatchConfig(deals: 10, seed: 5, opponentStats: true)
         let m1 = await MatchRunner.run(config: cfg, specs: specs, players: players, save: false)
@@ -564,9 +484,8 @@ final class ArenaKitTests: XCTestCase {
         XCTAssertEqual(PlayerSpec.parse("dm:liquid/d1~argmax"), .decision("liquid/d1"))
         XCTAssertNil(PlayerSpec.parse("dm:liquid/d1~bogus"))
         XCTAssertNil(PlayerSpec.parse("dm:nomodel"))
-        XCTAssertEqual(PlayerSpec.parse("typesafe/jev-1.13"), .llm("typesafe/jev-1.13"), "plain ids stay chat until resolved")
-        XCTAssertEqual(PlayerSpec.parse("typesafe/jev-1.13")?.resolvingDecisionModels(["typesafe/jev-1.13"]), .decision("typesafe/jev-1.13"))
-        XCTAssertEqual(PlayerSpec.parse("openai/gpt-5")?.resolvingDecisionModels(["typesafe/jev-1.13"]), .llm("openai/gpt-5"))
+        XCTAssertEqual(PlayerSpec.parse("typesafe/jev-1.13"), .decision("typesafe/jev-1.13"), "plain ids are decision models")
+        XCTAssertEqual(PlayerSpec.parse("decision:typesafe/jev-1.13~mixed"), .decision("typesafe/jev-1.13", mode: .mixed))
 
         let a = PlayerSpec.decision("typesafe/jev-1.13"), b = PlayerSpec.decision("typesafe/jev-1.13", mode: .mixed)
         XCTAssertEqual(a.id, "dm:typesafe/jev-1.13")
@@ -575,17 +494,17 @@ final class ArenaKitTests: XCTestCase {
         XCTAssertEqual(a.displayName, "jev-1.13")
         XCTAssertEqual(b.displayName, "jev-1.13 · mixed")
         XCTAssertEqual(b.provider, "typesafe")
-        for spec in [a, b, .llm("openai/gpt-5", effort: "low"), .bot(.tag)] {
+        for spec in [a, b, .bot(.tag), .bot(.maniac)] {
             XCTAssertEqual(PlayerSpec.parse(spec.id), spec, "id round-trips through parse")
             XCTAssertEqual(try JSONDecoder().decode(PlayerSpec.self, from: JSONEncoder().encode(spec)), spec)
         }
-        // Saved before decision models existed.
+        // Chat-model players from older builds no longer decode (MatchStore skips such matches).
         let old = #"{"kind":"llm","model":"openai/gpt-5","reasoningEffort":"low"}"#
-        XCTAssertEqual(try JSONDecoder().decode(PlayerSpec.self, from: Data(old.utf8)), .llm("openai/gpt-5", effort: "low"))
+        XCTAssertThrowsError(try JSONDecoder().decode(PlayerSpec.self, from: Data(old.utf8)))
         let oldBot = #"{"kind":"bot","model":"tag"}"#
         XCTAssertEqual(try JSONDecoder().decode(PlayerSpec.self, from: Data(oldBot.utf8)), .bot(.tag))
-        let oldMeta = #"{"raw":[],"latency":0,"promptTokens":1,"completionTokens":2,"reasoningTokens":0,"cost":0,"errors":0,"fallback":false}"#
+        let oldMeta = #"{"raw":[],"latency":0,"promptTokens":1,"completionTokens":2,"reasoningTokens":0,"thinking":"x","cost":0,"errors":0,"fallback":false}"#
         XCTAssertNil(try JSONDecoder().decode(DecisionMeta.self, from: Data(oldMeta.utf8)).decision)
-        XCTAssertThrowsError(try PlayerFactory.make(a, chat: nil))
+        XCTAssertThrowsError(try PlayerFactory.make(a, decisions: nil))
     }
 }

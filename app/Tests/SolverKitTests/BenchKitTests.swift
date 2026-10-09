@@ -1,5 +1,5 @@
 @testable import BenchKit
-import LLMKit
+import OpenRouterKit
 import SolverKit
 import XCTest
 
@@ -64,10 +64,10 @@ final class BenchKitTests: XCTestCase {
     func testSummaryAndLeaderboard() {
         let ds = [makeDecision(id: "d001"), makeDecision(id: "d002", street: .turn)]
         let suite = BenchmarkSuite(id: "t", name: "t", parameters: SuiteParameters(decisions: 2), decisions: ds, solves: 1, generationSeconds: 0)
-        var a = BenchmarkRun(suiteId: "t", model: "a/good", displayName: "a/good", kind: .llm, options: nil)
+        var a = BenchmarkRun(suiteId: "t", model: "a/good", displayName: "a/good", kind: .decisionModel)
         a.results = [DecisionResult(decisionId: "d001", choice: 2, latency: 2, cost: 0.01),
                      DecisionResult(decisionId: "d002", choice: 1, latency: 4, cost: 0.02)]
-        var b = BenchmarkRun(suiteId: "t", model: "b/bad", displayName: "b/bad", kind: .llm, options: nil)
+        var b = BenchmarkRun(suiteId: "t", model: "b/bad", displayName: "b/bad", kind: .decisionModel)
         b.results = [DecisionResult(decisionId: "d001", choice: nil, error: "x")]
 
         let s = Scoring.summarize(a, suite: suite)
@@ -90,33 +90,14 @@ final class BenchKitTests: XCTestCase {
         XCTAssertEqual(board.map(\.model), ["a/good", "b/bad"])
     }
 
-    func testResponseParsing() {
-        let acts = makeDecision().actions
-        XCTAssertEqual(ResponseParser.parse("Calling is fine.\n{\"action\": 2}", actions: acts), 1)
-        XCTAssertEqual(ResponseParser.parse("```json\n{\"action\": \"3\"}\n```", actions: acts), 2)
-        XCTAssertEqual(ResponseParser.parse("{\"action\": \"Call 5 bb\"}", actions: acts), 1)
-        XCTAssertEqual(ResponseParser.parse("{\"action\": \"fold\"}", actions: acts), 0)
-        XCTAssertEqual(ResponseParser.parse("{\"action\": \"raise to 15bb\"}", actions: acts), 2)
-        XCTAssertEqual(ResponseParser.parse("I think we fold. Action: 1", actions: acts), 0)
-        XCTAssertEqual(ResponseParser.parse("Final answer\nCall 5 bb", actions: acts), 1)
-        XCTAssertEqual(ResponseParser.parse("Option 1 vs option 3... \"action\": 3 }", actions: acts), 2)
-        XCTAssertNil(ResponseParser.parse("{\"action\": 9}", actions: acts))
-        XCTAssertNil(ResponseParser.parse("I'm not sure.", actions: acts))
-        XCTAssertNil(ResponseParser.parse("{\"action\": 1.5}", actions: acts))
-    }
-
-    func testPromptMentionsEverythingNeeded() {
+    func testHistoryLines() {
         let d = makeDecision()
-        let p = PromptBuilder.user(d)
-        XCTAssertTrue(p.contains("Your hand: As Kd"))
-        XCTAssertTrue(p.contains("Board: Qs Jh 2h 8d 3c"))
-        XCTAssertTrue(p.contains("You are BTN, in position"))
-        XCTAssertTrue(p.contains("BB bets 5 bb (100% pot)"))
-        XCTAssertTrue(p.contains("1. Fold"))
-        XCTAssertTrue(p.contains("2. Call 5 bb"))
-        XCTAssertTrue(p.contains("3. Raise to 15 bb (67% pot)"))
-        XCTAssertTrue(p.contains("5 bb to call"))
-        XCTAssertFalse(p.contains("QhQd"), "villain's cards must never leak")
+        let lines = d.historyLines()
+        XCTAssertEqual(lines.count, 3) // flop, turn, river
+        XCTAssertTrue(lines[0].hasPrefix("Flop Qs Jh 2h (pot 5.5 bb)"))
+        XCTAssertTrue(lines[2].contains("BB bets 5 bb (100% pot)"))
+        XCTAssertTrue(d.historyLines(names: ["OOP", "IP"])[2].contains("OOP bets"))
+        XCTAssertFalse(lines.joined().contains("QhQd"), "villain's cards must never leak")
     }
 
     func testBaselinesAreDeterministic() {
@@ -175,18 +156,17 @@ final class BenchKitTests: XCTestCase {
         XCTAssertEqual(again[0].results.count, 4)
     }
 
-    /// A scripted "LLM" that goes through the real prompt + parser path.
-    struct ScriptedLLM: DecisionMaker {
-        let reply: @Sendable (Decision) -> String
+    /// A scripted decision model that answers from a fixed key per decision (nil = failure).
+    struct ScriptedModel: DecisionMaker {
+        let pick: @Sendable (Decision) -> Int?
         var id: String { "mock/scripted" }
         var displayName: String { "Scripted" }
-        var kind: PlayerKind { .llm }
+        var kind: PlayerKind { .decisionModel }
         func decide(_ d: Decision) async throws -> DecisionResult {
-            _ = PromptBuilder.messages(d)
-            let text = reply(d)
-            let c = ResponseParser.parse(text, actions: d.actions)
-            return DecisionResult(decisionId: d.id, choice: c, rawResponse: text, error: c == nil ? "unparseable" : nil,
-                                  latency: 1, promptTokens: 500, completionTokens: 100, cost: 0.001)
+            let c = pick(d)
+            return DecisionResult(decisionId: d.id, choice: c, error: c == nil ? "no choice" : nil, latency: 1,
+                                  promptTokens: 500, cost: 0.001,
+                                  actionProbabilities: c.map { i in d.actions.indices.map { $0 == i ? 1 : 0 } })
         }
     }
 
@@ -199,20 +179,28 @@ final class BenchKitTests: XCTestCase {
         }
         let ds = [makeDecision(id: "d001"), makeDecision(id: "d002"), makeDecision(id: "d003")]
         let suite = BenchmarkSuite(id: "mock", name: "mock", parameters: SuiteParameters(decisions: 3), decisions: ds, solves: 1, generationSeconds: 0)
-        let llm = ScriptedLLM { d in
+        let player = ScriptedModel { d in
             switch d.id {
-            case "d001": return "Raise for value.\n{\"action\": 3}"
-            case "d002": return "Just call. {\"action\": \"Call 5 bb\"}"
-            default: return "hmm"
+            case "d001": return 2
+            case "d002": return 1
+            default: return nil
             }
         }
-        let runs = try await BenchmarkRunner.run(suite: suite, players: [llm], concurrency: 2)
+        let runs = try await BenchmarkRunner.run(suite: suite, players: [player], concurrency: 2)
         let row = Scoring.summarize(runs[0], suite: suite)
         XCTAssertEqual(row.answered, 3)
         XCTAssertEqual(row.overall.invalidRate, 1.0 / 3.0, accuracy: 1e-12)
         XCTAssertEqual(row.overall.gtoScore, (100 + 100.0 / 3 + 0) / 3, accuracy: 1e-9)
+        XCTAssertEqual(row.overall.distributionN, 3)
         XCTAssertEqual(row.totalCost, 0.003, accuracy: 1e-12)
+        XCTAssertEqual(runs[0].id, BenchmarkRun.makeId(suiteId: "mock", model: "mock/scripted"))
         XCTAssertNotNil(BenchStore.loadRun(id: runs[0].id))
+
+        // Old chat-LLM run files (kind "llm", chat options) are skipped, not fatal.
+        let legacy = #"{"id":"mock__openai_gpt-5","suiteId":"mock","model":"openai/gpt-5","displayName":"openai/gpt-5","kind":"llm","options":{"reasoningEffort":"low","jsonMode":false},"promptVersion":1,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","results":[]}"#
+        try Data(legacy.utf8).write(to: BenchStore.url(run: "mock__openai_gpt-5"))
+        XCTAssertEqual(BenchStore.runs(suiteId: "mock").map(\.model), ["mock/scripted"])
+        XCTAssertNil(BenchStore.loadRun(id: "mock__openai_gpt-5"))
     }
 
     // MARK: - Decision models
@@ -239,7 +227,7 @@ final class BenchKitTests: XCTestCase {
 
     static func choice(_ key: String, _ probs: [String: Double], confidence: Double? = 0.6, cost: Double = 0.0002) -> DecideResult {
         DecideResult(model: "mock/dm", answers: ["action": .choice(choice: key, confidence: confidence, probabilities: probs)],
-                     usage: ChatUsage(promptTokens: 900, cost: cost), latency: 0.4, raw: "{\"answers\":{}}")
+                     usage: APIUsage(promptTokens: 900, cost: cost), latency: 0.4, raw: "{\"answers\":{}}")
     }
 
     func testDecisionStateAndQuestion() {
@@ -398,13 +386,16 @@ final class BenchKitTests: XCTestCase {
         XCTAssertTrue(text.contains("Mixed %pot"))
     }
 
-    func testModelRouting() {
+    func testModelResolution() throws {
         let catalog: Set<String> = ["typesafe/jev-1.13", "liquid/d1"]
-        XCTAssertEqual(BenchCLI.route("typesafe/jev-1.13", decisionCatalog: catalog), .decision("typesafe/jev-1.13"))
-        XCTAssertEqual(BenchCLI.route("openai/gpt-5", decisionCatalog: catalog), .chat("openai/gpt-5"))
-        XCTAssertEqual(BenchCLI.route("dm:new/model", decisionCatalog: catalog), .decision("new/model"))
-        XCTAssertEqual(BenchCLI.route("chat:liquid/d1", decisionCatalog: catalog), .chat("liquid/d1"))
-        // Catalog unavailable → suggested roster.
-        XCTAssertEqual(BenchCLI.route("cloudflare/clef", decisionCatalog: nil), .decision("cloudflare/clef"))
+        XCTAssertEqual(try BenchCLI.resolveModels(["typesafe/jev-1.13", "dm:liquid/d1", "liquid/d1"], decisionCatalog: catalog),
+                       ["typesafe/jev-1.13", "liquid/d1"])
+        XCTAssertThrowsError(try BenchCLI.resolveModels(["typesafe/jev-1.13", "openai/gpt-5"], decisionCatalog: catalog)) { e in
+            let msg = e.localizedDescription
+            XCTAssertTrue(msg.contains("openai/gpt-5"))
+            XCTAssertTrue(msg.contains("liquid/d1"), "lists the available decision models")
+            XCTAssertFalse(msg.contains("typesafe/jev-1.13, openai"), "only unknown ids are reported as unknown")
+        }
+        XCTAssertThrowsError(try BenchCLI.resolveModels(["dm:new/model"], decisionCatalog: catalog))
     }
 }

@@ -17,8 +17,7 @@ struct LeaderboardView: View {
     }
 
     private var rows: [ModelScore] { model.leaderboard.sorted(using: sortOrder) }
-    /// API players (decision models + chat LLMs).
-    private var llms: [ModelScore] { model.leaderboard.filter { !$0.isBaseline } }
+    private var decisionModels: [ModelScore] { model.leaderboard.filter(\.isDecisionModel) }
     private var baselines: [ModelScore] { model.leaderboard.filter(\.isBaseline) }
     private var groups: [PlayerKind] {
         PlayerKind.allCases.sorted { $0.order < $1.order }.filter { k in model.leaderboard.contains { $0.kind == k } }
@@ -29,10 +28,10 @@ struct LeaderboardView: View {
             ContentUnavailableView {
                 Label("No results yet", systemImage: "trophy")
             } description: {
-                Text("Run the baselines (no API needed) to calibrate the scale, then run models from the Run tab.")
+                Text("Run the baselines (no API needed) to calibrate the scale, then run decision models from the Run tab.")
             } actions: {
                 Button("Run Baselines") { model.startBaselines() }
-                Button("Choose Models…") { model.tab = .run }
+                Button("Choose Decision Models…") { model.tab = .run }
             }
         } else {
             ScrollView {
@@ -41,7 +40,7 @@ struct LeaderboardView: View {
                     table
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
                         Panel("GTO score", systemImage: "chart.bar.xaxis") {
-                            ScoreChart(llms: llms, baselines: baselines)
+                            ScoreChart(models: decisionModels, baselines: baselines)
                         }
                         Panel("Mixed vs. argmax EV loss", systemImage: "chart.bar.doc.horizontal") {
                             MixedVsArgmaxChart(rows: model.leaderboard.filter(\.hasDistribution))
@@ -56,10 +55,10 @@ struct LeaderboardView: View {
                             BreakdownChart(rows: model.leaderboard.filter { $0.model != Baseline.bestEV.id }, breakdown: breakdown, suite: suite)
                         }
                         Panel("Cost vs. score", systemImage: "dollarsign.circle") {
-                            CostScoreChart(llms: llms)
+                            CostScoreChart(models: decisionModels)
                         }
                         Panel("Latency", systemImage: "stopwatch") {
-                            LatencyChart(llms: llms)
+                            LatencyChart(models: decisionModels)
                         }
                     }
                     definitions
@@ -95,7 +94,6 @@ struct LeaderboardView: View {
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 18, alignment: .trailing)
                     Image(systemName: r.kind.icon).foregroundStyle(.secondary).font(.caption)
                     Text(r.label).lineLimit(1).foregroundStyle(r.isBaseline ? .secondary : .primary)
-                    if r.isDecisionModel { DecisionBadge() }
                     if !r.isComplete {
                         Text("\(r.answered)/\(r.total)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                     }
@@ -163,7 +161,7 @@ struct LeaderboardView: View {
                 .width(60)
                 TableColumn("Cost", value: \ModelScore.totalCost) { r in
                     Text(r.isBaseline ? "–" : Fmt.usd(r.totalCost)).monospacedDigit()
-                        .help(r.isBaseline ? "" : "\(BenchFmt.tokens(r.promptTokens)) prompt · \(BenchFmt.tokens(r.completionTokens)) completion tokens (\(BenchFmt.tokens(r.reasoningTokens)) reasoning)")
+                        .help(r.isBaseline ? "" : "\(BenchFmt.tokens(r.promptTokens)) input tokens (output is free)")
                 }
                 .width(60)
             }
@@ -191,8 +189,8 @@ struct LeaderboardView: View {
                 def("Best", "chosen action within \(String(format: "%.2g", Scoring.bestTolerance * 100))% of the pot of the best EV.")
                 def("GTO-ok", "the equilibrium plays the chosen action at least \(Int(Scoring.approvedFrequency * 100))% of the time with this hand.")
                 def("Blunder", "EV loss above \(Int(Scoring.blunderThreshold * 100))% of the pot.")
-                def("Invalid", "no parseable legal action, an unknown decision key, or an API failure; scored as the worst action.")
-                def("Mixed loss", "for players that report probabilities (decision models; sampled GTO uses its strategy): Σ p(a) · EV loss(a), % pot — the EV lost if the reported distribution were played instead of its top choice.")
+                def("Invalid", "no choice answer, an unknown action key, or an API failure; scored as the worst action (and the worst distribution).")
+                def("Mixed loss", "for decision models (and sampled GTO, which uses its strategy): Σ p(a) · EV loss(a), % pot — the EV lost if the reported distribution were played instead of its top choice.")
                 def("TV dist", "total-variation distance ½ Σ |p(a) − GTO(a)| between the reported distribution and the equilibrium strategy of the hero's hand; 0 = same mix, 1 = disjoint.")
                 def("P(best)", "calibration: mean probability assigned to the best-EV action(s) (within the Best tolerance).")
             }
@@ -273,7 +271,7 @@ struct HoverY: ViewModifier {
 // MARK: - Charts
 
 struct ScoreChart: View {
-    let llms: [ModelScore]
+    let models: [ModelScore]
     let baselines: [ModelScore]
     @State private var hovered: String?
 
@@ -281,18 +279,17 @@ struct ScoreChart: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 14) {
                 LegendDot(PlayerKind.decisionModel.tint, "Decision model")
-                LegendDot(PlayerKind.llm.tint, "Chat LLM")
                 Text("bars with 95% CI").font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 5) {
                     Rectangle().fill(Viz.reference).frame(width: 12, height: 2)
                     Text("Baseline").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            if llms.isEmpty {
-                Text("Model results appear here. Baselines are drawn as reference lines.").font(.caption).foregroundStyle(.secondary)
+            if models.isEmpty {
+                Text("Decision-model results appear here. Baselines are drawn as reference lines.").font(.caption).foregroundStyle(.secondary)
             }
             Chart {
-                ForEach(llms) { r in
+                ForEach(models) { r in
                     BarMark(x: .value("GTO score", r.score), y: .value("Model", r.shortLabel), height: .fixed(16))
                         .foregroundStyle(r.kind.tint.opacity(hovered == nil || hovered == r.shortLabel ? 1 : 0.45))
                         .clipShape(UnevenRoundedRectangle(bottomTrailingRadius: 4, topTrailingRadius: 4))
@@ -329,7 +326,7 @@ struct ScoreChart: View {
             }
             .chartYAxis { AxisMarks { _ in AxisValueLabel().foregroundStyle(.primary) } }
             .modifier(HoverY(hovered: $hovered))
-            .frame(height: max(160, CGFloat(llms.count) * 30 + 50))
+            .frame(height: max(160, CGFloat(models.count) * 30 + 50))
         }
     }
 }
@@ -412,14 +409,14 @@ struct BreakdownChart: View {
 }
 
 struct CostScoreChart: View {
-    let llms: [ModelScore]
+    let models: [ModelScore]
     @State private var hovered: String?
 
     /// USD per 100 decisions, so partial runs compare fairly.
     private func cost(_ r: ModelScore) -> Double { max(1e-4, r.totalCost / Double(max(1, r.answered)) * 100) }
 
     private var useLog: Bool {
-        let cs = llms.map(cost)
+        let cs = models.map(cost)
         guard let lo = cs.min(), let hi = cs.max() else { return false }
         return hi / lo > 20
     }
@@ -428,8 +425,8 @@ struct CostScoreChart: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("GTO score vs. USD per 100 decisions\(useLog ? " (log scale)" : "") — up and left is better")
                 .font(.caption).foregroundStyle(.secondary)
-            if llms.isEmpty {
-                Text("No model runs yet.").font(.callout).foregroundStyle(.secondary).frame(height: 160)
+            if models.isEmpty {
+                Text("No decision-model runs yet.").font(.callout).foregroundStyle(.secondary).frame(height: 160)
             } else {
                 chart
             }
@@ -437,7 +434,7 @@ struct CostScoreChart: View {
     }
 
     @ViewBuilder private var chart: some View {
-        let base = Chart(llms) { r in
+        let base = Chart(models) { r in
             PointMark(x: .value("USD / 100 decisions", cost(r)), y: .value("GTO score", r.score))
                 .symbolSize(hovered == r.id ? 140 : 80)
                 .foregroundStyle(r.kind.tint)
@@ -470,7 +467,7 @@ struct CostScoreChart: View {
                         let origin = geo[frame].origin
                         // Nearest point within 24 pt.
                         var best: (String, CGFloat)?
-                        for r in llms {
+                        for r in models {
                             guard let p = proxy.position(for: (x: cost(r), y: r.score)) else { continue }
                             let d = hypot(p.x + origin.x - pt.x, p.y + origin.y - pt.y)
                             if d < 24 && d < (best?.1 ?? .infinity) { best = (r.id, d) }
@@ -489,16 +486,16 @@ struct CostScoreChart: View {
 }
 
 struct LatencyChart: View {
-    let llms: [ModelScore]
+    let models: [ModelScore]
     @State private var hovered: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Mean seconds per decision (including retries)").font(.caption).foregroundStyle(.secondary)
-            if llms.isEmpty {
-                Text("No model runs yet.").font(.callout).foregroundStyle(.secondary).frame(height: 160)
+            if models.isEmpty {
+                Text("No decision-model runs yet.").font(.callout).foregroundStyle(.secondary).frame(height: 160)
             } else {
-                Chart(llms.sorted { $0.meanLatency < $1.meanLatency }) { r in
+                Chart(models.sorted { $0.meanLatency < $1.meanLatency }) { r in
                     BarMark(x: .value("Seconds", r.meanLatency), y: .value("Model", r.shortLabel), height: .fixed(14))
                         .foregroundStyle(r.kind.tint.opacity(hovered == nil || hovered == r.shortLabel ? 1 : 0.45))
                         .clipShape(UnevenRoundedRectangle(bottomTrailingRadius: 4, topTrailingRadius: 4))
@@ -515,7 +512,7 @@ struct LatencyChart: View {
                 }
                 .chartYAxis { AxisMarks { _ in AxisValueLabel().foregroundStyle(.primary) } }
                 .modifier(HoverY(hovered: $hovered))
-                .frame(height: max(140, CGFloat(llms.count) * 28 + 30))
+                .frame(height: max(140, CGFloat(models.count) * 28 + 30))
             }
         }
     }
@@ -551,7 +548,7 @@ struct MixedVsArgmaxChart: View {
                 Text("Mean EV loss, % pot — lower is better").font(.caption).foregroundStyle(.secondary)
             }
             if rows.isEmpty {
-                Text("Players that report action probabilities (decision models, sampled GTO) appear here.")
+                Text("Decision models and the sampled-GTO baseline appear here.")
                     .font(.callout).foregroundStyle(.secondary).frame(height: 140)
             } else {
                 Chart(points) { p in

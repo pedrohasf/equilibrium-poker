@@ -11,11 +11,11 @@ A native macOS GTO poker lab:
   per-combo EV/equity inspector).
 - **Model Benchmarks** — measures how much EV OpenRouter
   [decision models](https://openrouter.ai/models?output_modalities=decisions)
-  (TypeSafe Jev, Liquid d1, Cloudflare Clef, GPT-6 Luna Decisions, …) and chat
-  LLMs lose versus the solved equilibrium, decision by decision. Decision models
-  return a probability for every action, so they are also scored as mixed
-  strategies (mixed EV loss, distance to the GTO mix, P(best action)).
-- **Arena** — full heads-up matches between decision models, LLMs and bots
+  (TypeSafe Jev, Liquid d1, Cloudflare Clef, GPT-6 Luna Decisions, …) lose
+  versus the solved equilibrium, decision by decision. They return a probability
+  for every action, so they are also scored as mixed strategies (mixed EV loss,
+  distance to the GTO mix, P(best action)).
+- **Arena** — full heads-up matches between decision models and bots
   (decision models play argmax or sample their returned distribution), in duplicate format,
   with bb/100, all-in-EV, player stats and hand-history replays.
 
@@ -45,7 +45,7 @@ app/                  Swift package
   SolverKit           Swift wrapper around the core, cards/ranges/presets
   DesignSystem        theme + shared components
   SolverUI            solver workbench
-  LLMKit              OpenRouter client, keychain
+  OpenRouterKit       OpenRouter decisions client, keychain
   BenchKit / BenchUI  GTO EV-loss benchmark
   ArenaKit / ArenaUI  heads-up match engine & table
   eqbench             CLI for benchmarks and arena matches
@@ -79,9 +79,9 @@ eqbench arena match --a dm:typesafe/jev-1.13 --b bot:tag --deals 100
 
 Decision models are called through `POST /api/alpha/decisions` (fallback
 `/api/v1/systemone`) with a structured JSON `state` and one `choice` question
-whose options are the legal actions. They receive derived facts (made hand,
-draws, pot odds, SPR) as the API guidance recommends — chat LLMs don't, so
-compare the two groups with that in mind.
+whose options are the legal actions, plus derived facts (made hand, draws, pot
+odds, SPR) as the API guidance recommends. Chat/text models are intentionally
+not supported.
 
 ## Benchmark methodology (short)
 

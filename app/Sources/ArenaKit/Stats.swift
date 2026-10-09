@@ -178,7 +178,7 @@ public enum MatchStats {
                              avgLatency: timed > 0 ? latency / Double(timed) : nil, promptTokens: ptok, completionTokens: ctok)
     }
 
-    /// Short text for LLM prompts: opponent tendencies and own result so far.
+    /// Short text for decision-model states: opponent tendencies and own result so far.
     public static func promptSummary(_ hands: [HandRecord], me: Int, specs: [PlayerSpec]) -> String? {
         guard hands.count >= 5 else { return nil }
         let opp = player(hands, player: 1 - me, spec: specs[1 - me], duplicate: false)

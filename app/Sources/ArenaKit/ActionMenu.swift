@@ -17,7 +17,7 @@ public struct MenuOption: Codable, Hashable, Sendable {
     public var isAllIn: Bool { sizing == .allIn }
 }
 
-/// Builds the discrete menu of legal actions shown to players (LLMs and bots alike).
+/// Builds the discrete menu of legal actions shown to players (decision models and bots alike).
 public enum ActionMenu {
     public static let preflopMultiples: [Double] = [2.5, 3, 4]
     public static let postflopFractions: [Double] = [0.33, 0.5, 0.75, 1.0, 1.5]

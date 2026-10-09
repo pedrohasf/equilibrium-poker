@@ -97,13 +97,13 @@ public struct DecideResult: Sendable, Hashable, Codable {
     public var provider: String?
     public var answers: [String: DecisionAnswer]
     /// promptTokens = input tokens; decision models bill input only.
-    public var usage: ChatUsage
+    public var usage: APIUsage
     public var latency: Double
     /// Raw response body, for debugging / display.
     public var raw: String
 
     public init(id: String? = nil, model: String, provider: String? = nil, answers: [String: DecisionAnswer],
-                usage: ChatUsage = .init(), latency: Double = 0, raw: String = "") {
+                usage: APIUsage = .init(), latency: Double = 0, raw: String = "") {
         self.id = id
         self.model = model
         self.provider = provider
@@ -185,7 +185,7 @@ extension OpenRouterClient: DecisionProvider {
                 continue
             }
         }
-        var usage = ChatUsage()
+        var usage = APIUsage()
         if let u = obj["usage"] as? [String: Any] {
             usage.promptTokens = (u["input_tokens"] as? NSNumber)?.intValue ?? 0
             usage.completionTokens = (u["output_tokens"] as? NSNumber)?.intValue ?? 0

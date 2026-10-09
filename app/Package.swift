@@ -25,17 +25,17 @@ let package = Package(
         .target(name: "SolverKit", dependencies: ["CGTOCore"]),
         .target(name: "DesignSystem", dependencies: ["SolverKit"]),
         .target(name: "SolverUI", dependencies: ["SolverKit", "DesignSystem"]),
-        .target(name: "LLMKit"),
-        .target(name: "BenchKit", dependencies: ["SolverKit", "LLMKit"]),
-        .target(name: "BenchUI", dependencies: ["BenchKit", "SolverKit", "LLMKit", "DesignSystem"]),
-        .target(name: "ArenaKit", dependencies: ["SolverKit", "LLMKit"]),
-        .target(name: "ArenaUI", dependencies: ["ArenaKit", "SolverKit", "LLMKit", "DesignSystem"]),
+        .target(name: "OpenRouterKit"),
+        .target(name: "BenchKit", dependencies: ["SolverKit", "OpenRouterKit"]),
+        .target(name: "BenchUI", dependencies: ["BenchKit", "SolverKit", "OpenRouterKit", "DesignSystem"]),
+        .target(name: "ArenaKit", dependencies: ["SolverKit", "OpenRouterKit"]),
+        .target(name: "ArenaUI", dependencies: ["ArenaKit", "SolverKit", "OpenRouterKit", "DesignSystem"]),
         .executableTarget(
             name: "Equilibrium",
-            dependencies: ["SolverKit", "DesignSystem", "SolverUI", "LLMKit", "BenchKit", "BenchUI", "ArenaKit", "ArenaUI"]
+            dependencies: ["SolverKit", "DesignSystem", "SolverUI", "OpenRouterKit", "BenchKit", "BenchUI", "ArenaKit", "ArenaUI"]
         ),
-        .executableTarget(name: "eqbench", dependencies: ["BenchKit", "ArenaKit", "LLMKit", "SolverKit"]),
-        .testTarget(name: "SolverKitTests", dependencies: ["SolverKit", "BenchKit", "ArenaKit", "LLMKit"]),
+        .executableTarget(name: "eqbench", dependencies: ["BenchKit", "ArenaKit", "OpenRouterKit", "SolverKit"]),
+        .testTarget(name: "SolverKitTests", dependencies: ["SolverKit", "BenchKit", "ArenaKit", "OpenRouterKit"]),
     ],
     swiftLanguageModes: [.v5]
 )

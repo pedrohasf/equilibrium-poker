@@ -1,6 +1,6 @@
 import ArenaKit
 import DesignSystem
-import LLMKit
+import OpenRouterKit
 import SwiftUI
 
 /// Small capsule marking System One decision models.

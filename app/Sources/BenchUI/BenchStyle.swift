@@ -127,30 +127,10 @@ struct ActionChip: View {
 }
 
 extension PlayerKind {
-    var icon: String {
-        switch self {
-        case .decisionModel: return "scope"
-        case .llm: return "sparkles"
-        case .baseline: return "cpu"
-        }
-    }
+    var icon: String { self == .decisionModel ? "scope" : "cpu" }
 
     /// Series colour for charts that compare player groups.
-    var tint: Color {
-        switch self {
-        case .decisionModel: return Viz.series1
-        case .llm: return Viz.series3
-        case .baseline: return Viz.reference
-        }
-    }
-}
-
-/// "Decision" capsule marking System One decision models.
-struct DecisionBadge: View {
-    var body: some View {
-        Tag("Decision", tint: Viz.series1)
-            .help("OpenRouter System One decision model: answers a typed choice question with probabilities; output is free")
-    }
+    var tint: Color { self == .decisionModel ? Viz.series1 : Viz.reference }
 }
 
 extension ModelScore {
@@ -167,7 +147,7 @@ extension ModelScore {
     var blunders: Double { overall.blunderRate }
     var invalid: Double { overall.invalidRate }
 
-    /// Short name for chart labels: "openai/gpt-5 · low" → "gpt-5 · low".
+    /// Short name for chart labels: "typesafe/jev-1.13" → "jev-1.13".
     var shortLabel: String {
         if isBaseline { return label }
         let parts = label.split(separator: "/", maxSplits: 1)

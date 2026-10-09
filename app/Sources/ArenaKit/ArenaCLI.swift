@@ -1,34 +1,33 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 
 /// `eqbench arena ...` subcommands.
 public enum ArenaCLI {
     public static let usage = """
-    eqbench arena — heads-up NLHE matches between LLMs and bots (duplicate format).
+    eqbench arena — heads-up NLHE matches between System One decision models and bots (duplicate format).
 
     USAGE:
       eqbench arena match --a <player> --b <player> [--deals 50] [--seed 1] [--concurrency 4]
-                          [--effort low|medium|high] [--stats] [--single] [--verbose] [--no-save]
+                          [--stats] [--single] [--verbose] [--no-save]
       eqbench arena list                       Saved matches
-      eqbench arena show <match-id> [hand#] [--reasoning]
+      eqbench arena show <match-id> [hand#] [--probs]
                                                Summary, or a PokerStars-style hand history
       eqbench arena leaderboard                Ratings across all saved matches
       eqbench arena bots                       Built-in bots
       eqbench arena decision-models            Live catalog of System One decision models
 
     PLAYERS:
-      bot:tag, bot:station, bot:maniac, bot:random, or an OpenRouter model id such as
-      openai/gpt-5 (append @low / @high to set the reasoning effort for that player).
-      Decision models: dm:typesafe/jev-1.13 plays the model's top choice (argmax);
-      dm:typesafe/jev-1.13~mix samples from its probabilities (seeded). Plain ids that are
-      decision models in the live catalog are detected automatically.
+      bot:tag, bot:station, bot:maniac, bot:random, or an OpenRouter System One decision model:
+      typesafe/jev-1.13 (or dm:typesafe/jev-1.13) plays the model's top choice (argmax);
+      typesafe/jev-1.13~mix samples from its probabilities (seeded). Model ids are checked
+      against the live catalog (`eqbench arena decision-models`).
 
     OPTIONS:
       --deals N        distinct deals; each is played twice with seats swapped (2N hands)
       --single         play each deal once (no duplicate), alternating the button
-      --stats          include a running opponent-stats summary in LLM prompts / decision states
-      --effort E       default reasoning effort for LLM players
-      --verbose        print every hand history as it finishes
+      --stats          include a running opponent-stats summary in decision-model states
+      --verbose        print every hand history (with decision-model probabilities) as it finishes
+      --probs          (show) include decision-model probabilities / bot rationale; alias --reasoning
     """
 
     public static func run(_ args: [String]) async throws {
@@ -75,9 +74,8 @@ public enum ArenaCLI {
             print(usage)
             return
         }
-        let effort = option("--effort", &args)
-        guard var a = PlayerSpec.parse(aText) else { throw EngineError("unknown player '\(aText)'") }
-        guard var b = PlayerSpec.parse(bText) else { throw EngineError("unknown player '\(bText)'") }
+        guard let a = PlayerSpec.parse(aText) else { throw EngineError("unknown player '\(aText)'") }
+        guard let b = PlayerSpec.parse(bText) else { throw EngineError("unknown player '\(bText)'") }
         var config = MatchConfig()
         config.deals = Int(option("--deals", &args) ?? "") ?? 50
         config.seed = UInt64(option("--seed", &args) ?? "") ?? 1
@@ -89,17 +87,14 @@ public enum ArenaCLI {
 
         let needsKey = a.usesOpenRouter || b.usesOpenRouter
         let client: OpenRouterClient? = needsKey ? try OpenRouterClient.fromStoredKey(maxConcurrent: max(4, config.concurrency * 2)) : nil
-        // Plain ids that are System One decision models become decision players.
-        if let client, [a, b].contains(where: { $0.kind == .llm && $0.reasoningEffort == nil }),
-           let dms = try? await client.decisionModels() {
-            let ids = Set(dms.map(\.id))
-            a = a.resolvingDecisionModels(ids)
-            b = b.resolvingDecisionModels(ids)
+        // Only System One decision models are supported: validate ids against the live catalog.
+        if let client {
+            let ids = Set(try await client.decisionModels().map(\.id))
+            for spec in [a, b] where spec.isDecisionModel && !ids.contains(spec.model) {
+                throw EngineError("'\(spec.model)' is not a System One decision model (see `eqbench arena decision-models`)")
+            }
         }
-        if a.kind == .llm && a.reasoningEffort == nil { a.reasoningEffort = effort }
-        if b.kind == .llm && b.reasoningEffort == nil { b.reasoningEffort = effort }
-        let options = LLMPlayer.Options(includeMatchSummary: config.opponentStats)
-        let players = try [a, b].map { try PlayerFactory.make($0, chat: client, decisions: client, options: options) }
+        let players = try [a, b].map { try PlayerFactory.make($0, decisions: client, includeMatchSummary: config.opponentStats) }
 
         let id = MatchRecord.newID()
         print("Match \(id): A = \(a.id)  vs  B = \(b.id)")
@@ -166,7 +161,7 @@ public enum ArenaCLI {
         if a.cost + b.cost > 0 || a.avgLatency != nil || b.avgLatency != nil {
             row("Cost", String(format: "$%.4f", a.cost), String(format: "$%.4f", b.cost))
             row("Avg latency", a.avgLatency.map { String(format: "%.2fs", $0) } ?? "–", b.avgLatency.map { String(format: "%.2fs", $0) } ?? "–")
-            row("Tokens in/out", "\(a.promptTokens)/\(a.completionTokens)", "\(b.promptTokens)/\(b.completionTokens)")
+            row("Input tokens", "\(a.promptTokens)", "\(b.promptTokens)")
         }
     }
 
@@ -187,12 +182,14 @@ public enum ArenaCLI {
 
     static func show(_ args: [String]) throws {
         var rest = args
-        let reasoning = flag("--reasoning", &rest)
+        let probsFlag = flag("--probs", &rest)
+        let reasoningAlias = flag("--reasoning", &rest)
+        let probs = probsFlag || reasoningAlias
         guard let id = rest.first else { print(usage); return }
         let m = try MatchStore.find(id)
         if rest.count > 1, let n = Int(rest[1]) {
             guard let h = m.hands.first(where: { $0.number == n }) else { throw EngineError("hand #\(n) not found (1…\(m.hands.count))") }
-            print(HandHistoryFormatter.format(h, match: m, includeReasoning: reasoning))
+            print(HandHistoryFormatter.format(h, match: m, includeReasoning: probs))
             return
         }
         print("Match \(m.id) · \(m.title) · seed \(m.config.seed)")

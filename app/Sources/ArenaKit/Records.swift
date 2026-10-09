@@ -1,5 +1,5 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 import SolverKit
 
 public struct MatchConfig: Codable, Hashable, Sendable {
@@ -10,7 +10,7 @@ public struct MatchConfig: Codable, Hashable, Sendable {
     public var concurrency: Int
     public var duplicate: Bool
     public var stackBB: Double
-    /// Give LLM players a running summary of the match (opponent stats) in the prompt.
+    /// Give decision-model players a running summary of the match (opponent stats) in their state.
     public var opponentStats: Bool
 
     public init(deals: Int = 50, seed: UInt64 = 1, concurrency: Int = 4, duplicate: Bool = true, stackBB: Double = 100, opponentStats: Bool = false) {
@@ -125,8 +125,15 @@ public enum MatchStore {
         try Storage.encoder.encode(m).write(to: url(for: m.id), options: .atomic)
     }
 
+    /// Loads a match. Matches from older builds with players that are no longer supported
+    /// (e.g. chat models) throw a readable error; `all()` skips them.
     public static func load(_ id: String) throws -> MatchRecord {
-        try Storage.decoder.decode(MatchRecord.self, from: Data(contentsOf: url(for: id)))
+        let data = try Data(contentsOf: url(for: id))
+        do {
+            return try Storage.decoder.decode(MatchRecord.self, from: data)
+        } catch is DecodingError {
+            throw EngineError("match '\(id)' can't be read (it may use chat-model players, which are no longer supported)")
+        }
     }
 
     /// Finds a match by exact id or unique prefix.

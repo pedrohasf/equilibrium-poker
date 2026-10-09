@@ -1,26 +1,23 @@
 import Foundation
-import LLMKit
+import OpenRouterKit
 import SolverKit
 
 /// `eqbench bench ...` subcommands.
 public enum BenchCLI {
     static let help = """
-    eqbench bench — score decisions against solved GTO spots (EV loss vs. equilibrium).
+    eqbench bench — score OpenRouter System One decision models against solved GTO spots (EV loss vs. equilibrium).
 
     USAGE:
       eqbench bench generate [--decisions 60] [--streets river,turn] [--scenarios id,id] [--seed 1]
                              [--min-spread 0.02] [--per-solve 3] [--concurrency 2] [--name text] [--out file]
       eqbench bench suites                         List saved suites
-      eqbench bench run --suite <id|file> --models a,b,c [--concurrency 8] [--reasoning low]
-                        [--temperature 0] [--max-tokens 4000] [--limit N] [--fresh]
-                        System One decision models (e.g. typesafe/jev-1.13) are detected from the live
-                        catalog and asked a typed choice question; force with a `dm:` prefix
-                        (`chat:` forces a chat LLM). Chat-only options don't apply to them.
+      eqbench bench run --suite <id|file> --models a,b,c [--concurrency 8] [--limit N] [--fresh]
+                        Decision models only (e.g. typesafe/jev-1.13), validated against the live
+                        catalog; each is asked one typed choice question. A `dm:` prefix is accepted.
       eqbench bench decision-models                List live OpenRouter decision models with prices
       eqbench bench baselines --suite <id|file>    Run the bot baselines (no API calls)
       eqbench bench report [--suite <id|file>]     Leaderboard (default: newest suite)
       eqbench bench show --suite <id> --decision d001   One decision: GTO, EVs and every answer
-      eqbench bench prompt --suite <id> [--decision d001]  Print the exact LLM prompt
       eqbench bench state --suite <id> [--decision d001] [--model id]  Print the JSON state + question sent to decision models
 
     Streets: flop, turn, river (flop solves take minutes). Scenarios: \(Scenarios.all.map(\.id).joined(separator: ", ")).
@@ -37,7 +34,6 @@ public enum BenchCLI {
         case "baselines", "bots": try await runBaselines(opts)
         case "report", "leaderboard": try report(opts)
         case "show": try show(opts)
-        case "prompt": try prompt(opts)
         case "state": try state(opts)
         case "decision-models", "dms": try await listDecisionModels()
         default: print(help)
@@ -133,42 +129,34 @@ public enum BenchCLI {
     static func runModels(_ o: Options) async throws {
         let suite = try suite(o)
         let models = o.list("models")
-        guard !models.isEmpty else { throw BenchError("--models is required (comma separated OpenRouter ids)") }
+        guard !models.isEmpty else { throw BenchError("--models is required (comma separated decision-model ids)") }
         let client = try OpenRouterClient.fromStoredKey(maxConcurrent: o.int("concurrency") ?? 8)
-        let options = ChatOptions(temperature: o.double("temperature"), maxTokens: o.int("max-tokens"), reasoningEffort: o["reasoning"])
-        // Fetch the decision catalog once, only if some id isn't explicitly prefixed.
-        var catalog: Set<String>?
-        if models.contains(where: { !$0.hasPrefix("dm:") && !$0.hasPrefix("chat:") }) {
-            do {
-                catalog = Set(try await client.decisionModels().map(\.id))
-            } catch {
-                print("warning: could not load the decision-model catalog (\(error.localizedDescription)); "
-                      + "falling back to the suggested roster. Use dm:<id> to force a decision model.")
-            }
+        let catalog: Set<String>
+        do {
+            catalog = Set(try await client.decisionModels().map(\.id))
+        } catch {
+            throw BenchError("Could not load the decision-model catalog: \(error.localizedDescription)")
         }
-        let players: [any DecisionMaker] = models.map { raw in
-            switch route(raw, decisionCatalog: catalog) {
-            case .decision(let id): return DecisionModelMaker(model: id, provider: client)
-            case .chat(let id): return LLMDecisionMaker(model: id, client: client, options: options)
-            }
-        }
-        for p in players where p.kind == .decisionModel {
-            print("  \(p.id): decision model (state v\(DecisionStateBuilder.version))")
-        }
+        let ids = try resolveModels(models, decisionCatalog: catalog)
+        let players: [any DecisionMaker] = ids.map { DecisionModelMaker(model: $0, provider: client) }
+        print("  \(ids.count) decision model(s) · state v\(DecisionStateBuilder.version)")
         try await execute(suite: suite, players: players, o: o)
     }
 
-    public enum Route: Equatable, Sendable {
-        case decision(String), chat(String)
-    }
-
-    /// `dm:<id>` → decision model, `chat:<id>` → chat LLM; otherwise decision model iff in the live
-    /// decision catalog (or, when the catalog is unavailable, in `DecisionRoster.suggested`).
-    public static func route(_ raw: String, decisionCatalog: Set<String>?) -> Route {
-        if raw.hasPrefix("dm:") { return .decision(String(raw.dropFirst(3))) }
-        if raw.hasPrefix("chat:") { return .chat(String(raw.dropFirst(5))) }
-        let known = decisionCatalog ?? Set(DecisionRoster.suggested)
-        return known.contains(raw) ? .decision(raw) : .chat(raw)
+    /// Strips an optional `dm:` prefix and checks every id against the live decision catalog.
+    /// Throws listing the unknown ids (and the available ones) if any is not a decision model.
+    public static func resolveModels(_ raw: [String], decisionCatalog: Set<String>) throws -> [String] {
+        let ids = raw.map { $0.hasPrefix("dm:") ? String($0.dropFirst(3)) : $0 }
+        let unknown = ids.filter { !decisionCatalog.contains($0) }
+        guard unknown.isEmpty else {
+            let available = decisionCatalog.sorted().joined(separator: ", ")
+            throw BenchError("Not an OpenRouter decision model: \(unknown.joined(separator: ", ")). "
+                             + "Only System One decision models can be benchmarked"
+                             + (available.isEmpty ? " (the decision catalog is empty)." : ". Available: \(available)")
+                             + " — see `eqbench bench decision-models`.")
+        }
+        var seen = Set<String>()
+        return ids.filter { seen.insert($0).inserted }
     }
 
     static func listDecisionModels() async throws {
@@ -217,7 +205,7 @@ public enum BenchCLI {
         guard let d = suite.decision(o["decision"] ?? suite.decisions.first?.id ?? "") else { throw BenchError("No such decision") }
         print("\(d.id) · \(d.scenarioName) · \(d.headline)")
         print("Villain held \(d.villainCards) · equity \(BB.pct(d.equity)) · pot \(BB.fmt(d.pot)) bb · solver \(String(format: "%.2f", d.exploitability))% pot")
-        for line in PromptBuilder.historyLines(d) { print("  " + line) }
+        for line in d.historyLines() { print("  " + line) }
         print("")
         print(row(["Action", "GTO", "EV", "Loss %pot"], widths: [28, 6, 9, 9]))
         for (i, a) in d.actions.enumerated() {
@@ -246,12 +234,6 @@ public enum BenchCLI {
         print("// \(d.id) · \(d.headline) · state v\(DecisionStateBuilder.version) · ~\(DecisionStateBuilder.estimatedInputTokens(d)) input tokens")
         print("// POST https://openrouter.ai/api/alpha/decisions (question id is never shown to the model)")
         print(DecisionStateBuilder.requestBody(d, model: o["model"] ?? DecisionRoster.suggested[0]).prettyText)
-    }
-
-    static func prompt(_ o: Options) throws {
-        let suite = try suite(o)
-        guard let d = suite.decision(o["decision"] ?? suite.decisions.first?.id ?? "") else { throw BenchError("No such decision") }
-        print("── system ──\n\(PromptBuilder.system)\n\n── user ──\n\(PromptBuilder.user(d))")
     }
 
     // MARK: Output

@@ -140,7 +140,7 @@ struct SuiteOverview: View {
     private var runsList: some View {
         VStack(alignment: .leading, spacing: 0) {
             if model.runs.isEmpty {
-                Text("No runs yet. Use Run Baselines in the toolbar to calibrate, then run models from the Run tab.")
+                Text("No runs yet. Use Run Baselines in the toolbar to calibrate, then run decision models from the Run tab.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             ForEach(model.runs) { run in

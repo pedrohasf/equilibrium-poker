@@ -41,9 +41,9 @@ struct DecisionExplorer: View {
         return suite.decisions.filter { d in
             if let street, d.street != street { return false }
             if let type, d.decisionType != type { return false }
-            let llm = (answers[d.id] ?? []).filter { $0.run.kind.isModel }
-            if blundersOnly && !llm.contains(where: { $0.score.blunder }) { return false }
-            if disagreementOnly && Set(llm.map { $0.score.choice ?? -1 }).count < 2 { return false }
+            let dms = (answers[d.id] ?? []).filter { $0.run.kind == .decisionModel }
+            if blundersOnly && !dms.contains(where: { $0.score.blunder }) { return false }
+            if disagreementOnly && Set(dms.map { $0.score.choice ?? -1 }).count < 2 { return false }
             if !q.isEmpty {
                 let hay = [d.id, d.heroCards, d.board.joined(), d.board.joined(separator: " "), d.scenarioName, d.heroPosition].joined(separator: " ").lowercased()
                 if !hay.contains(q) { return false }
@@ -105,7 +105,7 @@ struct DecisionExplorer: View {
             Toggle("Blunders", isOn: $blundersOnly).toggleStyle(.button)
                 .help("Only decisions where some model lost more than \(Int(Scoring.blunderThreshold * 100))% of the pot")
             Toggle("Disagreement", isOn: $disagreementOnly).toggleStyle(.button)
-                .help("Only decisions where models chose different actions")
+                .help("Only decisions where decision models chose different actions")
             Spacer()
             Text("\(count) of \(suite.decisions.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             TextField("Filter: cards, board, scenario", text: $search)
@@ -123,8 +123,8 @@ struct DecisionRow: View {
     let answers: [Answer]
 
     var body: some View {
-        let llm = answers.filter { $0.run.kind.isModel }
-        let worst = llm.max { $0.score.evLoss < $1.score.evLoss }
+        let dms = answers.filter { $0.run.kind == .decisionModel }
+        let worst = dms.max { $0.score.evLoss < $1.score.evLoss }
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -141,10 +141,10 @@ struct DecisionRow: View {
                 }
             }
             Spacer(minLength: 4)
-            if !llm.isEmpty {
+            if !dms.isEmpty {
                 VStack(alignment: .trailing, spacing: 2) {
-                    let best = llm.filter(\.score.isBest).count
-                    Text("\(best)/\(llm.count) best").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    let best = dms.filter(\.score.isBest).count
+                    Text("\(best)/\(dms.count) best").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     if let w = worst, w.score.evLoss > 0 {
                         let g = AnswerGrade(w.score)
                         Label(BenchFmt.pctPot(w.score.evLossPot), systemImage: g.icon)
@@ -165,7 +165,6 @@ struct DecisionDetail: View {
     let decision: Decision
     let answers: [Answer]
     @State private var revealVillain = false
-    @State private var showPrompt = false
     @State private var showState = false
 
     private var d: Decision { decision }
@@ -185,7 +184,7 @@ struct DecisionDetail: View {
                     Panel("Action", systemImage: "text.alignleft") {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(d.preflopSummary).font(.callout).foregroundStyle(.secondary)
-                            ForEach(Array(PromptBuilder.historyLines(d, names: d.positions).enumerated()), id: \.offset) { _, line in
+                            ForEach(Array(d.historyLines(names: d.positions).enumerated()), id: \.offset) { _, line in
                                 Text(line).font(.callout).fixedSize(horizontal: false, vertical: true)
                             }
                             Text("\(d.heroPosition) to act · pot \(BB.fmt(d.pot)) bb\(d.facingBet ? " · \(BB.fmt(d.toCall)) to call" : "")")
@@ -208,16 +207,6 @@ struct DecisionDetail: View {
                 } label: {
                     Label("State sent to decision models (v\(DecisionStateBuilder.version), ~\(DecisionStateBuilder.estimatedInputTokens(d)) input tokens)",
                           systemImage: "curlybraces")
-                }
-                DisclosureGroup(isExpanded: $showPrompt) {
-                    Text(PromptBuilder.system + "\n\n" + PromptBuilder.user(d))
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
-                } label: {
-                    Label("Prompt sent to chat LLMs (v\(PromptBuilder.version))", systemImage: "text.bubble")
                 }
             }
             .padding(18)
@@ -310,7 +299,6 @@ struct AnswerRow: View {
                 Image(systemName: answer.run.kind.icon).foregroundStyle(.secondary).frame(width: 14)
                 Text(answer.run.label).font(.callout.weight(.medium)).lineLimit(1)
                     .foregroundStyle(answer.run.kind == .baseline ? .secondary : .primary)
-                if answer.run.kind == .decisionModel { DecisionBadge() }
                 Spacer()
                 ActionChip(actions: decision.actions, index: s.choice)
                     .frame(minWidth: 130, alignment: .leading)
@@ -339,28 +327,6 @@ struct AnswerRow: View {
                     HStack(spacing: 12) {
                         Text("Raw response")
                         Text("\(Fmt.duration(r.latency)) · \(BenchFmt.tokens(r.promptTokens)) input tok · \(Fmt.usd(r.cost))")
-                            .monospacedDigit().foregroundStyle(.secondary)
-                    }
-                    .font(.caption)
-                }
-            } else if answer.run.kind == .llm {
-                DisclosureGroup(isExpanded: $expanded) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let e = r.error { Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(Viz.serious) }
-                        if let reasoning = r.reasoning, !reasoning.isEmpty {
-                            Text("Reasoning").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                            Text(reasoning).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                        }
-                        Text("Response").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        Text(r.rawResponse ?? "(empty)").font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.background.tertiary, in: RoundedRectangle(cornerRadius: 8))
-                } label: {
-                    HStack(spacing: 12) {
-                        Text("Reasoning & response")
-                        Text("\(Fmt.duration(r.latency)) · \(BenchFmt.tokens(r.promptTokens + r.completionTokens)) tok · \(Fmt.usd(r.cost))")
                             .monospacedDigit().foregroundStyle(.secondary)
                     }
                     .font(.caption)
@@ -430,7 +396,7 @@ struct SpotTable: View {
                     }
                 }
                 .onTapGesture { revealVillain.toggle() }
-                .help(revealVillain ? "Hide villain's sampled hand" : "Reveal villain's sampled hand (never shown to models)")
+                .help(revealVillain ? "Hide villain's sampled hand" : "Reveal villain's sampled hand (never shown to decision models)")
             }
             VStack(spacing: 6) {
                 BoardView(d.boardCards, slots: 5, width: 40)

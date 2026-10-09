@@ -91,7 +91,7 @@ public struct ArenaHomeView: View {
             }
             VStack(spacing: 6) {
                 Text("Heads-up arena").font(.largeTitle.weight(.semibold))
-                Text("Pit language models and bots against each other in full no-limit hold'em matches.\nEvery deal is played twice with seats swapped, so luck cancels out.")
+                Text("Pit System One decision models and bots against each other in full no-limit hold'em matches.\nEvery deal is played twice with seats swapped, so luck cancels out.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
             }
@@ -104,7 +104,7 @@ public struct ArenaHomeView: View {
                     .controlSize(.large)
             }
             if !store.hasAPIKey {
-                Text("No OpenRouter key yet — bots work offline. Add a key in Settings (⌘,) to play LLMs.")
+                Text("No OpenRouter key yet — bots work offline. Add a key in Settings (⌘,) to play decision models.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

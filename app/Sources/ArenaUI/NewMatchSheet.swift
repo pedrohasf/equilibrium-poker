@@ -1,6 +1,6 @@
 import ArenaKit
 import DesignSystem
-import LLMKit
+import OpenRouterKit
 import SwiftUI
 
 struct NewMatchSheet: View {
@@ -14,18 +14,11 @@ struct NewMatchSheet: View {
     @AppStorage("arena.concurrency") private var concurrency = 4
     @AppStorage("arena.duplicate") private var duplicate = true
     @AppStorage("arena.opponentStats") private var opponentStats = false
-    @AppStorage("arena.effort") private var effort = ""
     @AppStorage("arena.animate") private var animate = true
     @State private var error: String?
 
-    private var specA: PlayerSpec? { spec(playerA) }
-    private var specB: PlayerSpec? { spec(playerB) }
-
-    private func spec(_ id: String) -> PlayerSpec? {
-        guard var s = PlayerSpec.parse(id) else { return nil }
-        if s.kind == .llm && s.reasoningEffort == nil && !effort.isEmpty { s.reasoningEffort = effort }
-        return s
-    }
+    private var specA: PlayerSpec? { PlayerSpec.parse(playerA) }
+    private var specB: PlayerSpec? { PlayerSpec.parse(playerB) }
 
     private var needsKey: Bool { [specA, specB].contains { $0?.usesOpenRouter == true } && !store.hasAPIKey }
 
@@ -65,12 +58,8 @@ struct NewMatchSheet: View {
                     }
                     Stepper("Parallel deals: \(concurrency)", value: $concurrency, in: 1...16)
                 }
-                Section("Model players") {
-                    Picker("Reasoning effort", selection: $effort) {
-                        Text("Provider default").tag("")
-                        ForEach(["minimal", "low", "medium", "high"], id: \.self) { Text($0.capitalized).tag($0) }
-                    }
-                    Toggle("Show running opponent stats in prompts / decision states", isOn: $opponentStats)
+                Section("Decision models") {
+                    Toggle("Include running opponent stats in decision states", isOn: $opponentStats)
                     LabeledContent("Estimated cost") { Text(costText).monospacedDigit() }
                 }
                 Section("Playback") {
@@ -104,7 +93,7 @@ struct NewMatchSheet: View {
             Image(systemName: "key.fill").foregroundStyle(Theme.gold)
             VStack(alignment: .leading, spacing: 2) {
                 Text("No OpenRouter API key").font(.callout.weight(.semibold))
-                Text("Bot-vs-bot matches work without one. To pit language or decision models against each other, add a key in Settings (⌘,).")
+                Text("Bot-vs-bot matches work without one. To play System One decision models, add a key in Settings (⌘,).")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -120,8 +109,7 @@ struct NewMatchSheet: View {
         if [specA, specB].allSatisfy({ $0?.usesOpenRouter != true }) { return "Free (bots only)" }
         if parts.contains(where: { $0 == nil }) { return store.catalog.isEmpty ? "Unknown (catalog not loaded)" : "Unknown pricing" }
         let total = parts.compactMap { $0 }.reduce(0, +)
-        let dm = [specA, specB].contains { $0?.kind == .decision } ? ", decision models bill input only" : ""
-        return "≈ \(Fmt.usd(total))  (\(hands) hands, ~\(String(format: "%.1f", CostEstimate.decisionsPerHand)) decisions per player per hand\(dm))"
+        return "≈ \(Fmt.usd(total))  (\(hands) hands, ~\(String(format: "%.1f", CostEstimate.decisionsPerHand)) decisions per player per hand, input tokens only)"
     }
 
     private func start() {
@@ -137,7 +125,7 @@ struct NewMatchSheet: View {
     }
 }
 
-/// Bot or model chooser with search over the live OpenRouter catalog and the saved roster.
+/// Bot or decision-model chooser with search over the live OpenRouter decision-model catalog.
 struct PlayerPicker: View {
     let title: String
     let player: Int
@@ -148,7 +136,7 @@ struct PlayerPicker: View {
     @State private var lastMode: DecisionMode = .argmax
 
     enum Mode: String, CaseIterable, Identifiable {
-        case bots = "Bots", roster = "Roster", decision = "Decision", catalog = "All models"
+        case bots = "Bots", decision = "Decision models"
         var id: String { rawValue }
     }
 
@@ -200,28 +188,21 @@ struct PlayerPicker: View {
                         }
                         .tag("bot:\(b.rawValue)")
                     }
-                case .roster:
-                    ForEach(filtered(ModelRoster.saved), id: \.self) { m in modelRow(m).tag(m) }
                 case .decision:
                     let suggested = filtered(store.suggestedDecisionModels)
-                    let others = filtered(store.decisionCatalog.map(\.id).filter { !DecisionRoster.suggested.contains($0) })
+                    let others = filtered(store.catalog.map(\.id).filter { !DecisionRoster.suggested.contains($0) })
                     Section("Suggested") {
-                        ForEach(suggested, id: \.self) { m in modelRow(m, decision: true).tag(decisionTag(m)) }
+                        ForEach(suggested, id: \.self) { m in modelRow(m).tag(decisionTag(m)) }
                     }
                     if !others.isEmpty {
                         Section("All decision models") {
-                            ForEach(others, id: \.self) { m in modelRow(m, decision: true).tag(decisionTag(m)) }
+                            ForEach(others, id: \.self) { m in modelRow(m).tag(decisionTag(m)) }
                         }
                     }
-                    if store.catalog.isEmpty && store.hasAPIKey {
-                        Text(store.catalogError ?? "Loading catalog…").font(.caption).foregroundStyle(.secondary)
-                    }
-                case .catalog:
                     if store.catalog.isEmpty {
-                        Text(store.hasAPIKey ? (store.catalogError ?? "Loading catalog…") : "Add an API key to browse models.")
-                            .foregroundStyle(.secondary)
+                        Text(store.hasAPIKey ? (store.catalogError ?? "Loading catalog…") : "Add an API key to play decision models.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    ForEach(filtered(store.chatCatalog.map(\.id)), id: \.self) { m in modelRow(m).tag(m) }
                 }
             }
             .listStyle(.bordered)
@@ -230,10 +211,9 @@ struct PlayerPicker: View {
         }
         .frame(maxWidth: .infinity)
         .onAppear {
-            switch selectedSpec?.kind {
-            case .llm: mode = .roster
-            case .decision: mode = .decision; lastMode = selectedSpec?.mode ?? .argmax
-            default: break
+            if let s = selectedSpec, s.kind == .decision {
+                mode = .decision
+                lastMode = s.mode
             }
         }
     }
@@ -245,7 +225,7 @@ struct PlayerPicker: View {
 
     private func decisionTag(_ id: String) -> String { PlayerSpec.decision(id, mode: decisionMode.wrappedValue).id }
 
-    private func modelRow(_ id: String, decision: Bool = false) -> some View {
+    private func modelRow(_ id: String) -> some View {
         let info = store.price(for: id)
         return HStack {
             VStack(alignment: .leading, spacing: 1) {
@@ -253,15 +233,10 @@ struct PlayerPicker: View {
                 Text(id.split(separator: "/").first.map(String.init) ?? "").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if decision {
-                DecisionBadge()
-                if let pin = info?.promptPricePerM {
-                    Text(String(format: "$%.3f in", pin)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        .help("USD per million input tokens; output is free")
-                }
-            } else if let i = info, let pin = i.promptPricePerM, let pout = i.completionPricePerM {
-                Text(String(format: "$%.2f / $%.2f", pin, pout)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    .help("USD per million input / output tokens")
+            DecisionBadge()
+            if let pin = info?.promptPricePerM {
+                Text(String(format: "$%.3f in", pin)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .help("USD per million input tokens; output is free")
             }
         }
     }

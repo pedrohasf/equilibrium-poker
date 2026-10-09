@@ -1,5 +1,4 @@
 import Foundation
-import LLMKit
 import SolverKit
 
 // MARK: - Streets
@@ -198,6 +197,28 @@ public struct Decision: Codable, Hashable, Sendable, Identifiable {
     public var headline: String {
         "\(street.title) · \(heroPosition) \(facingBet ? "facing \(BB.fmt(toCall)) bb" : "to act") · \(heroCards) on \(board.joined(separator: " "))"
     }
+
+    /// Human-readable street-by-street history, one line per street. `names` defaults to the
+    /// positions with " (you)" after hero's.
+    public func historyLines(names: [String]? = nil) -> [String] {
+        let names = names ?? positions.enumerated().map { $0.offset == heroSeat ? $0.element + " (you)" : $0.element }
+        var lines: [String] = []
+        for street in Street.allCases where street <= self.street {
+            let boardText: String
+            switch street {
+            case .flop: boardText = board.prefix(3).joined(separator: " ")
+            case .turn: boardText = board.count > 3 ? board[3] : ""
+            case .river: boardText = board.count > 4 ? board[4] : ""
+            }
+            let entries = history.filter { $0.street == street && $0.action != nil }
+            let potStart = street == .flop ? flopPot
+                : (history.first { $0.street == street }?.potBefore ?? entries.first?.potBefore ?? pot)
+            let acts = entries.map { $0.text(names: names) }
+            let body = acts.isEmpty ? "(no action yet)" : acts.joined(separator: ", ") + (street == self.street ? "" : ".")
+            lines.append("\(street.title) \(boardText) (pot \(BB.fmt(potStart)) bb): \(body)")
+        }
+        return lines
+    }
 }
 
 public enum DecisionType: String, Codable, CaseIterable, Sendable, Identifiable {
@@ -274,39 +295,15 @@ public struct BenchmarkSuite: Codable, Hashable, Sendable, Identifiable {
 // MARK: - Runs
 
 public enum PlayerKind: String, Codable, Sendable, CaseIterable {
-    /// Chat LLM answering a text prompt (raw value kept for saved runs).
-    case llm
-    case baseline
     /// OpenRouter System One decision model (typed `choice` question with probabilities).
     case decisionModel
+    /// Offline reference bot that calibrates the scale.
+    case baseline
 
-    /// Any API-backed player (chat LLM or decision model).
-    public var isModel: Bool { self != .baseline }
-
-    public var title: String {
-        switch self {
-        case .llm: return "Chat LLM"
-        case .baseline: return "Baseline"
-        case .decisionModel: return "Decision model"
-        }
-    }
-
-    public var groupTitle: String {
-        switch self {
-        case .llm: return "Chat LLMs"
-        case .baseline: return "Baselines"
-        case .decisionModel: return "Decision models"
-        }
-    }
-
-    /// Display / grouping order: decision models first (the benchmark's focus), then chat LLMs, then bots.
-    public var order: Int {
-        switch self {
-        case .decisionModel: return 0
-        case .llm: return 1
-        case .baseline: return 2
-        }
-    }
+    public var title: String { self == .decisionModel ? "Decision model" : "Baseline" }
+    public var groupTitle: String { self == .decisionModel ? "Decision models" : "Baselines" }
+    /// Display / grouping order: decision models first, then bots.
+    public var order: Int { self == .decisionModel ? 0 : 1 }
 }
 
 /// One player's answer to one decision.
@@ -315,16 +312,14 @@ public struct DecisionResult: Codable, Hashable, Sendable, Identifiable {
     /// Chosen action index; nil = invalid / failed answer (scored as the worst action).
     public var choice: Int?
     public var rawResponse: String?
-    public var reasoning: String?
     public var error: String?
     public var latency: Double
     public var promptTokens: Int
     public var completionTokens: Int
-    public var reasoningTokens: Int
     public var cost: Double
     public var answeredAt: Date
     /// Probability the player assigns to each legal action (same order as `Decision.actions`, sums to 1).
-    /// Set by decision models (and the sampled-GTO baseline); nil for argmax-only players and old runs.
+    /// Set by decision models and the sampled-GTO baseline; nil for argmax-only baselines and failed answers.
     public var actionProbabilities: [Double]?
     /// Decision model's reported confidence in its choice (0–1).
     public var confidence: Double?
@@ -332,18 +327,16 @@ public struct DecisionResult: Codable, Hashable, Sendable, Identifiable {
     public var id: String { decisionId }
     public var isValid: Bool { choice != nil }
 
-    public init(decisionId: String, choice: Int?, rawResponse: String? = nil, reasoning: String? = nil, error: String? = nil,
-                latency: Double = 0, promptTokens: Int = 0, completionTokens: Int = 0, reasoningTokens: Int = 0,
+    public init(decisionId: String, choice: Int?, rawResponse: String? = nil, error: String? = nil,
+                latency: Double = 0, promptTokens: Int = 0, completionTokens: Int = 0,
                 cost: Double = 0, answeredAt: Date = Date(), actionProbabilities: [Double]? = nil, confidence: Double? = nil) {
         self.decisionId = decisionId
         self.choice = choice
         self.rawResponse = rawResponse
-        self.reasoning = reasoning
         self.error = error
         self.latency = latency
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
-        self.reasoningTokens = reasoningTokens
         self.cost = cost
         self.answeredAt = answeredAt
         self.actionProbabilities = actionProbabilities
@@ -351,7 +344,7 @@ public struct DecisionResult: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
-/// All answers of one player (model + options) on one suite.
+/// All answers of one player on one suite.
 public struct BenchmarkRun: Codable, Hashable, Sendable, Identifiable {
     public var id: String
     public var suiteId: String
@@ -359,43 +352,32 @@ public struct BenchmarkRun: Codable, Hashable, Sendable, Identifiable {
     public var model: String
     public var displayName: String
     public var kind: PlayerKind
-    public var options: ChatOptions?
-    public var promptVersion: Int
-    /// `DecisionStateBuilder.version` for decision-model runs (nil for chat LLMs, baselines and old runs).
+    /// `DecisionStateBuilder.version` for decision-model runs (nil for baselines).
     public var stateVersion: Int?
     public var createdAt: Date
     public var updatedAt: Date
     public var results: [DecisionResult]
 
-    public init(suiteId: String, model: String, displayName: String, kind: PlayerKind, options: ChatOptions?,
-                promptVersion: Int = PromptBuilder.version) {
-        self.id = BenchmarkRun.makeId(suiteId: suiteId, model: model, options: options)
+    public init(suiteId: String, model: String, displayName: String, kind: PlayerKind) {
+        self.id = BenchmarkRun.makeId(suiteId: suiteId, model: model)
         self.suiteId = suiteId
         self.model = model
         self.displayName = displayName
         self.kind = kind
-        self.options = options
-        self.promptVersion = promptVersion
         self.stateVersion = kind == .decisionModel ? DecisionStateBuilder.version : nil
         self.createdAt = Date()
         self.updatedAt = Date()
         self.results = []
     }
 
-    /// Stable id so re-running the same model/options on a suite resumes.
-    public static func makeId(suiteId: String, model: String, options: ChatOptions?) -> String {
-        var s = "\(suiteId)__\(model)"
-        if let e = options?.reasoningEffort { s += "__r-\(e)" }
-        if let t = options?.temperature { s += "__t\(t)" }
-        return s.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." ? $0 : "_" }.reduce(into: "") { $0.append($1) }
+    /// Stable id so re-running the same model on a suite resumes.
+    public static func makeId(suiteId: String, model: String) -> String {
+        "\(suiteId)__\(model)".map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." ? $0 : "_" }
+            .reduce(into: "") { $0.append($1) }
     }
 
-    /// Label including options, e.g. "openai/gpt-5 · low".
-    public var label: String {
-        var s = displayName
-        if let e = options?.reasoningEffort { s += " · \(e)" }
-        return s
-    }
+    /// Display label (the model id or baseline name).
+    public var label: String { displayName }
 
     public func result(for decisionId: String) -> DecisionResult? { results.first { $0.decisionId == decisionId } }
     public var answeredIds: Set<String> { Set(results.map(\.decisionId)) }
