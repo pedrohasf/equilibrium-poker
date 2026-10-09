@@ -30,7 +30,7 @@ Results site: [`web/`](web/) (static, no build step). You can browse it locally,
 
 ## Key findings
 
-Eleven decision models, about 12,700 judged decisions and about 4,700 arena hands. All
+Eleven decision models, about 20,000 judged decisions and about 38,000 arena hands (including bot reference matches). All
 numbers are on the site, and `notes.json` has the full detail.
 
 - **Best model: GPT-6 Luna Decisions.** It keeps **82 / 100** points on 200 solved turn and river spots.
