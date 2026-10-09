@@ -197,7 +197,7 @@ app/                    Swift package (macOS 26)
 web/                    static results site (+ data/*.json)
 examples/               sample solver configs
 scripts/                build-app.sh (app bundle), make-icon.sh (AppIcon.svg → .icns)
-assets/                 AppIcon.svg, social card (social-card.html → social.png), screenshots
+assets/                 AppIcon.svg, README banner (social.png), screenshots
 ```
 
 ## Limitations and caveats

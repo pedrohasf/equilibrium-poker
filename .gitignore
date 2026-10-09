@@ -19,3 +19,8 @@ DerivedData/
 
 # Local tool state
 .wrangler/
+
+# Local-only launch material (tweets, social drafts) — never committed
+/.local/
+LAUNCH.md
+assets/social-card.html
