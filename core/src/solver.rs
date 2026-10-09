@@ -47,6 +47,9 @@ pub struct GameConfig {
     /// Refuse to allocate trees larger than this (0 = no limit).
     #[serde(default)]
     pub max_memory_bytes: u64,
+    /// Solve suit-isomorphic turn/river cards once (requires suit-symmetric ranges).
+    #[serde(default = "default_true")]
+    pub isomorphism: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -78,6 +81,11 @@ pub struct Game {
     river_index: HashMap<u64, u32>,
     river: Vec<RiverRanks>,
     root_street: u8,
+    /// Suit permutations that are symmetries of the root (identity first).
+    pub perms: Vec<[u8; 4]>,
+    pub perm_inv: Vec<u8>,
+    /// `hand_perm[p][k][h]` = index of hand `h` mapped through `perms[k]`.
+    hand_perm: [Vec<Vec<u32>>; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -183,7 +191,60 @@ impl Game {
         let river_index = runouts.iter().enumerate().map(|(i, b)| (mask_of(b), i as u32)).collect();
 
         let root_street = board.len() as u8 - 3;
-        Ok(Game { tree_cfg, board, hands, weights, same, card_hands, river_index, river, root_street })
+
+        // Suit symmetries: permutations fixing the board (as a set) and both ranges.
+        let all_perms = crate::cards::suit_permutations();
+        let perms: Vec<[u8; 4]> = all_perms
+            .into_iter()
+            .enumerate()
+            .filter(|(k, perm)| {
+                if *k == 0 {
+                    return true;
+                }
+                if !cfg.isomorphism {
+                    return false;
+                }
+                let mapped: Vec<Card> = board.iter().map(|&c| crate::cards::permute_card(perm, c)).collect();
+                if mask_of(&mapped) != board_mask {
+                    return false;
+                }
+                (0..2).all(|p| {
+                    combos().iter().enumerate().all(|(i, c)| {
+                        let j = combo_index(crate::cards::permute_card(perm, c[0]), crate::cards::permute_card(perm, c[1]));
+                        ranges[p][i] == ranges[p][j]
+                    })
+                })
+            })
+            .map(|(_, p)| p)
+            .collect();
+        let perm_inv: Vec<u8> = perms
+            .iter()
+            .map(|p| {
+                let mut inv = [0u8; 4];
+                for (a, &b) in p.iter().enumerate() {
+                    inv[b as usize] = a as u8;
+                }
+                perms.iter().position(|q| *q == inv).expect("symmetry group not closed") as u8
+            })
+            .collect();
+        let mut hand_perm: [Vec<Vec<u32>>; 2] = [Vec::new(), Vec::new()];
+        for p in 0..2 {
+            let mut lookup = vec![u32::MAX; NUM_COMBOS];
+            for (i, c) in hands[p].iter().enumerate() {
+                lookup[combo_index(c[0], c[1])] = i as u32;
+            }
+            hand_perm[p] = perms
+                .iter()
+                .map(|perm| {
+                    hands[p]
+                        .iter()
+                        .map(|c| lookup[combo_index(crate::cards::permute_card(perm, c[0]), crate::cards::permute_card(perm, c[1]))])
+                        .collect()
+                })
+                .collect();
+        }
+
+        Ok(Game { tree_cfg, board, hands, weights, same, card_hands, river_index, river, root_street, perms, perm_inv, hand_perm })
     }
 
     pub fn n_hands(&self) -> [usize; 2] {
@@ -323,6 +384,28 @@ impl Game {
         r
     }
 
+    /// Sums canonical children values plus their suit-permuted images, times `factor`.
+    fn combine_chance(&self, p: usize, vals: &[Vec<f32>], iso: &[IsoCard], factor: f32, out: &mut [f32]) {
+        out.fill(0.0);
+        for v in vals {
+            out.iter_mut().zip(v).for_each(|(o, x)| *o += x);
+        }
+        for x in iso {
+            // value of hand h under card g(c) equals the canonical value of g^-1(h)
+            let map = &self.hand_perm[p][self.perm_inv[x.perm as usize] as usize];
+            let v = &vals[x.child as usize];
+            for (h, o) in out.iter_mut().enumerate() {
+                *o += v[map[h] as usize];
+            }
+        }
+        out.iter_mut().for_each(|o| *o *= factor);
+    }
+
+    /// Bitmask with every symmetry of the root enabled.
+    pub fn root_symmetries(&self) -> u32 {
+        (1u32 << self.perms.len()) - 1
+    }
+
     // ---------------------------------------------------------------- CFR
 
     /// One DCFR update of player `p`'s regrets below `node`; writes `p`'s
@@ -334,9 +417,9 @@ impl Game {
             Node::Terminal(t) => self.terminal_into(t, p, opp, board, out),
             Node::Chance(c) => {
                 let n = hero.len();
-                let factor = 1.0 / (c.cards.len() as f32 - 4.0);
-                let ChanceNode { cards, children, .. } = &mut **c;
-                let sum = children
+                let factor = 1.0 / (c.n_cards as f32 - 4.0);
+                let ChanceNode { cards, children, iso, .. } = &mut **c;
+                let vals: Vec<Vec<f32>> = children
                     .par_iter_mut()
                     .zip(cards.par_iter())
                     .map(|(child, &card)| {
@@ -349,11 +432,8 @@ impl Game {
                         }
                         v
                     })
-                    .reduce(|| vec![0.0f32; n], |mut a, b| {
-                        a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
-                        a
-                    });
-                out.iter_mut().zip(&sum).for_each(|(o, s)| *o = s * factor);
+                    .collect();
+                self.combine_chance(p, &vals, iso, factor, out);
             }
             Node::Action(_) if opp.iter().all(|&x| x == 0.0) => out.fill(0.0),
             Node::Action(a) => {
@@ -434,8 +514,8 @@ impl Game {
             Node::Terminal(t) => self.terminal_value(t, p, opp, board),
             Node::Chance(c) => {
                 let n = self.hands[p].len();
-                let factor = 1.0 / (c.cards.len() as f32 - 4.0);
-                let sum = c
+                let factor = 1.0 / (c.n_cards as f32 - 4.0);
+                let vals: Vec<Vec<f32>> = c
                     .children
                     .par_iter()
                     .zip(c.cards.par_iter())
@@ -447,11 +527,10 @@ impl Game {
                         }
                         v
                     })
-                    .reduce(|| vec![0.0f32; n], |mut a, b| {
-                        a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
-                        a
-                    });
-                sum.into_iter().map(|x| x * factor).collect()
+                    .collect();
+                let mut out = vec![0.0f32; n];
+                self.combine_chance(p, &vals, &c.iso, factor, &mut out);
+                out
             }
             Node::Action(_) if opp.iter().all(|&x| x == 0.0) => vec![0.0; self.hands[p].len()],
             Node::Action(a) => {
@@ -553,6 +632,17 @@ impl Game {
     }
 }
 
+/// DCFR (alpha = 1.5, beta = 0.5, gamma = 3) for 0-based iteration `i`.
+/// The average strategy is restarted at every power of 4 so that poor early
+/// iterates stop polluting it.
+fn discount_params(i: u32) -> Discount {
+    let nearest_pow4 = if i == 0 { 0 } else { 1u32 << ((31 - i.leading_zeros()) & !1) };
+    let ta = (i as f64 - 1.0).max(0.0);
+    let pa = ta * ta.sqrt();
+    let tg = (i - nearest_pow4) as f64;
+    Discount { pos: (pa / (pa + 1.0)) as f32, neg: 0.5, strat: (tg / (tg + 1.0)).powi(3) as f32 }
+}
+
 pub fn regret_match(regrets: &[f32], na: usize, n: usize) -> Vec<f32> {
     let mut s: Vec<f32> = regrets.iter().map(|r| r.max(0.0)).collect();
     let mut denom = vec![0.0f32; n];
@@ -624,8 +714,15 @@ pub struct Solver {
 pub fn estimate(cfg: &GameConfig) -> Result<(Game, Node, Estimate), String> {
     let game = Game::new(cfg)?;
     let n_hands = game.n_hands();
-    let mut b = TreeBuilder { cfg: &game.tree_cfg, n_hands, allocate: false, stats: TreeStats::default() };
-    let root = b.build(&game.board);
+    let mut b = TreeBuilder {
+        cfg: &game.tree_cfg,
+        n_hands,
+        allocate: false,
+        stats: TreeStats::default(),
+        perms: &game.perms,
+        perm_inv: &game.perm_inv,
+    };
+    let root = b.build(&game.board, game.root_symmetries());
     let stats = b.stats;
     let node_overhead = stats.action_nodes * 160 + stats.chance_nodes * 96 + stats.terminal_nodes * 40;
     let river_bytes: u64 = game.river.iter().map(|r| ((r[0].len() + r[1].len()) * std::mem::size_of::<RankEntry>()) as u64).sum();
@@ -654,9 +751,7 @@ impl Solver {
 
     pub fn iterate(&mut self) {
         let t = self.iteration + 1;
-        let tf = (t - 1) as f32;
-        let pa = tf.powf(1.5);
-        let d = Discount { pos: pa / (pa + 1.0), neg: 0.5, strat: (tf / t as f32).powi(2) };
+        let d = discount_params(self.iteration);
         let board = mask_of(&self.game.board);
         let game = &self.game;
         let root = &mut self.root;
@@ -737,7 +832,10 @@ impl Solver {
         let g = &self.game;
         let mut node = &self.root;
         let mut reach = g.weights.clone();
+        // `board` lives in the canonical frame of the tree; `frame` maps canonical suits to actual suits.
         let mut board = g.board.clone();
+        let mut actual_board = g.board.clone();
+        let mut frame: [u8; 4] = [0, 1, 2, 3];
         let mut history: Vec<String> = Vec::new();
         for step in path {
             match (node, step) {
@@ -755,21 +853,39 @@ impl Solver {
                     node = &a.children[i];
                 }
                 (Node::Chance(c), Step::Card(card)) => {
-                    let pos = c.cards.iter().position(|x| x == card).ok_or("card not available here")?;
-                    for p in 0..2 {
-                        reach[p] = g.deal(p, &reach[p], *card);
+                    let mut inv = [0u8; 4];
+                    for (a, &b) in frame.iter().enumerate() {
+                        inv[b as usize] = a as u8;
                     }
-                    board.push(*card);
+                    let x = crate::cards::permute_card(&inv, *card);
+                    let (pos, k) = c.locate(x).ok_or("card not available here")?;
+                    let canon = c.cards[pos];
+                    let step = g.perms[k as usize];
+                    frame = [frame[step[0] as usize], frame[step[1] as usize], frame[step[2] as usize], frame[step[3] as usize]];
+                    for p in 0..2 {
+                        reach[p] = g.deal(p, &reach[p], canon);
+                    }
+                    board.push(canon);
+                    actual_board.push(*card);
                     history.push(crate::cards::card_to_string(*card));
                     node = &c.children[pos];
                 }
                 _ => return Err("path does not match the tree".into()),
             }
         }
-        Ok(self.describe(node, &reach, &board, history))
+        Ok(self.describe(node, &reach, &board, &actual_board, &frame, history))
     }
 
-    fn describe(&self, node: &Node, reach: &[Vec<f32>; 2], board: &[Card], history: Vec<String>) -> NodeInfo {
+    fn describe(
+        &self,
+        node: &Node,
+        reach: &[Vec<f32>; 2],
+        board: &[Card],
+        actual_board: &[Card],
+        frame: &[u8; 4],
+        history: Vec<String>,
+    ) -> NodeInfo {
+        let to_actual = |c: Card| crate::cards::permute_card(frame, c);
         let g = &self.game;
         let bm = mask_of(board);
         let contrib = node.contrib();
@@ -779,7 +895,11 @@ impl Solver {
 
         let (kind, player, actions, chance_cards, terminal) = match node {
             Node::Action(a) => ("action", Some(a.player), a.actions.iter().map(ActionInfo::from).collect(), vec![], None),
-            Node::Chance(c) => ("chance", None, vec![], c.cards.iter().map(|&c| crate::cards::card_to_string(c)).collect(), None),
+            Node::Chance(c) => {
+                let mut cards: Vec<Card> = c.all_cards().into_iter().map(to_actual).collect();
+                cards.sort_unstable();
+                ("chance", None, vec![], cards.into_iter().map(crate::cards::card_to_string).collect(), None)
+            }
             Node::Terminal(t) => (
                 "terminal",
                 None,
@@ -834,7 +954,10 @@ impl Solver {
                     }
                     let na = actions_len(node, p);
                     hands.push(HandInfo {
-                        combo: combo_to_string(g.hands[p][h]),
+                        combo: {
+                            let c = g.hands[p][h];
+                            combo_to_string([to_actual(c[0]), to_actual(c[1])])
+                        },
                         weight: g.weights[p][h],
                         reach: r,
                         strategy: (0..na).map(|a| strategy[a * n + h]).collect(),
@@ -851,7 +974,7 @@ impl Solver {
         NodeInfo {
             kind: kind.into(),
             street: STREET_NAMES[street].into(),
-            board: board.iter().map(|&c| crate::cards::card_to_string(c)).collect(),
+            board: actual_board.iter().map(|&c| crate::cards::card_to_string(c)).collect(),
             pot,
             starting_pot: g.tree_cfg.starting_pot,
             contrib,
@@ -982,5 +1105,82 @@ mod tests {
         let info = s.query(&[Step::Action(0), Step::Action(0), Step::Card(crate::cards::card_from_str("3c").unwrap())]).unwrap();
         assert_eq!(info.kind, "action");
         assert_eq!(info.board.len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod iso_tests {
+    use super::*;
+
+    fn cfg(iso: bool) -> GameConfig {
+        serde_json::from_value(serde_json::json!({
+            "board": "Qh Jh 2h 7s",
+            "range_oop": "AA,KK,QQ,JJ,TT,77,22,AKs,AQs,KQs,QJs,JTs,T9s,98s,A5s,AQo,KJo",
+            "range_ip": "AA,KK,QQ,99,88,AKs,AJs,KQs,KTs,QTs,J9s,T8s,65s,54s,AKo,AJo,QJo",
+            "starting_pot": 10.0,
+            "effective_stack": 40.0,
+            "isomorphism": iso,
+            "bet_sizes": {
+                "turn": { "oop": { "bet": "50", "raise": "60" }, "ip": { "bet": "50", "raise": "60" } },
+                "river": { "oop": { "bet": "75", "raise": "" }, "ip": { "bet": "75", "raise": "" } }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn hand<'a>(info: &'a NodeInfo, p: usize, combo: &str) -> &'a HandInfo {
+        info.players[p].hands.iter().find(|h| h.combo == combo).unwrap_or_else(|| panic!("{combo} missing"))
+    }
+
+    const ITERS: u32 = 1000;
+
+    #[test]
+    fn isomorphism_matches_full_tree() {
+        let stop = AtomicBool::new(false);
+        let mut full = Solver::new(&cfg(false)).unwrap();
+        let mut iso = Solver::new(&cfg(true)).unwrap();
+        assert!(iso.game.perms.len() == 2, "expected c<->d symmetry, got {:?}", iso.game.perms);
+        assert!(iso.estimate.stats.action_nodes < full.estimate.stats.action_nodes);
+        let a = full.solve(ITERS, 0.0, ITERS, &stop, |_| {});
+        let b = iso.solve(ITERS, 0.0, ITERS, &stop, |_| {});
+        eprintln!("expl full {} iso {}", a.exploitability, b.exploitability);
+        assert!((a.exploitability - b.exploitability).abs() < 0.15, "{} vs {}", a.exploitability, b.exploitability);
+
+        // same river card in both trees, and mirrored river cards inside the iso tree
+        let path = |card: &str| vec![Step::Action(0), Step::Action(0), Step::Card(crate::cards::card_from_str(card).unwrap())];
+        let f_d = full.query(&path("5d")).unwrap();
+        let i_d = iso.query(&path("5d")).unwrap();
+        let i_c = iso.query(&path("5c")).unwrap();
+        assert_eq!(i_d.board, vec!["Qh", "Jh", "2h", "7s", "5d"]);
+        assert_eq!(i_c.board, vec!["Qh", "Jh", "2h", "7s", "5c"]);
+        assert_eq!(i_d.chance_cards.len(), 0);
+        for (combo, mirror) in [("AdKd", "AcKc"), ("AsKs", "AsKs"), ("AhKh", "AhKh"), ("AcKd", "AdKc")] {
+            for p in 0..2 {
+                let (Some(x), Some(y), Some(z)) = (
+                    f_d.players[p].hands.iter().find(|h| h.combo == combo),
+                    i_d.players[p].hands.iter().find(|h| h.combo == combo),
+                    i_c.players[p].hands.iter().find(|h| h.combo == mirror),
+                ) else { continue };
+                eprintln!("{combo} p{p}: full {} iso {} mirror {}", x.ev, y.ev, z.ev);
+                assert!((x.ev - y.ev).abs() < 0.2, "{combo} p{p}: full {} iso {}", x.ev, y.ev);
+                assert!((y.ev - z.ev).abs() < 1e-3, "{combo}/{mirror} p{p}: {} vs {}", y.ev, z.ev);
+                assert!((y.equity - z.equity).abs() < 1e-4);
+                for (s, t) in y.strategy.iter().zip(&z.strategy) {
+                    assert!((s - t).abs() < 1e-4);
+                }
+            }
+        }
+        let _ = hand(&i_d, 1, "AdKd");
+        // range-level values at the root must agree closely
+        let (fr, ir) = (full.query(&[]).unwrap(), iso.query(&[]).unwrap());
+        for p in 0..2 {
+            let ev = |n: &NodeInfo| -> f64 {
+                let v = &n.players[p].hands;
+                v.iter().map(|h| (h.ev * h.reach) as f64).sum::<f64>() / v.iter().map(|h| h.reach as f64).sum::<f64>()
+            };
+            assert!((ev(&fr) - ev(&ir)).abs() < 0.03, "root EV p{p}: {} vs {}", ev(&fr), ev(&ir));
+        }
+        let chance = iso.query(&[Step::Action(0), Step::Action(0)]).unwrap();
+        assert_eq!(chance.chance_cards.len(), 48);
     }
 }

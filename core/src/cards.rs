@@ -90,6 +90,31 @@ pub fn combo_to_string(c: [Card; 2]) -> String {
     card_to_string(a) + &card_to_string(b)
 }
 
+/// Applies a suit permutation (`perm[old_suit] = new_suit`) to a card.
+#[inline]
+pub fn permute_card(perm: &[u8; 4], c: Card) -> Card {
+    (c & !3) | perm[(c & 3) as usize]
+}
+
+/// All 24 suit permutations, identity first.
+pub fn suit_permutations() -> Vec<[u8; 4]> {
+    let mut out = Vec::with_capacity(24);
+    for a in 0..4u8 {
+        for b in 0..4u8 {
+            for c in 0..4u8 {
+                for d in 0..4u8 {
+                    let p = [a, b, c, d];
+                    let mut seen = [false; 4];
+                    if p.iter().all(|&x| !std::mem::replace(&mut seen[x as usize], true)) {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[inline]
 pub fn mask_of(cards: &[Card]) -> u64 {
     cards.iter().fold(0u64, |m, &c| m | (1u64 << c))

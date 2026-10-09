@@ -92,6 +92,10 @@ struct RootView: View {
                 }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+            .onAppear {
+                // `EQ_SECTION=benchmarks` opens a specific section (handy for screenshots/demos).
+                if let raw = ProcessInfo.processInfo.environment["EQ_SECTION"], let s = Section(rawValue: raw) { section = s }
+            }
         } detail: {
             switch section {
             case .solver: SolverWorkspaceView()

@@ -1,6 +1,6 @@
 //! Game tree construction for heads-up postflop no-limit hold'em.
 
-use crate::cards::{card_to_string, Card};
+use crate::cards::{card_to_string, permute_card, Card};
 use serde::{Deserialize, Serialize};
 
 pub const OOP: usize = 0;
@@ -161,9 +161,38 @@ pub struct ActionNode {
 pub struct ChanceNode {
     /// Street being dealt (1 = turn, 2 = river).
     pub street: u8,
+    /// Canonical cards, one child each.
     pub cards: Vec<Card>,
     pub children: Vec<Node>,
+    /// Cards isomorphic to a canonical child (solved once, values permuted).
+    pub iso: Vec<IsoCard>,
+    /// Total number of cards that can be dealt here (canonical + isomorphic).
+    pub n_cards: u8,
     pub contrib: [f32; 2],
+}
+
+/// A dealable card whose subtree is the image of `children[child]` under suit permutation `perm`.
+#[derive(Clone, Copy, Debug)]
+pub struct IsoCard {
+    pub card: Card,
+    pub child: u16,
+    pub perm: u8,
+}
+
+impl ChanceNode {
+    /// Returns (child index, permutation index mapping the canonical card to `card`).
+    pub fn locate(&self, card: Card) -> Option<(usize, u8)> {
+        if let Some(i) = self.cards.iter().position(|&c| c == card) {
+            return Some((i, 0));
+        }
+        self.iso.iter().find(|x| x.card == card).map(|x| (x.child as usize, x.perm))
+    }
+
+    pub fn all_cards(&self) -> Vec<Card> {
+        let mut v: Vec<Card> = self.cards.iter().copied().chain(self.iso.iter().map(|x| x.card)).collect();
+        v.sort_unstable();
+        v
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -212,6 +241,8 @@ struct State {
     street_base: [f32; 2],
     to_act: usize,
     raises: u32,
+    /// Bitmask of suit permutations (indices into `TreeBuilder::perms`) that are symmetries here.
+    valid: u32,
 }
 
 pub struct TreeBuilder<'a> {
@@ -220,12 +251,15 @@ pub struct TreeBuilder<'a> {
     pub n_hands: [usize; 2],
     pub allocate: bool,
     pub stats: TreeStats,
+    /// Suit permutations; index 0 must be the identity.
+    pub perms: &'a [[u8; 4]],
+    pub perm_inv: &'a [u8],
 }
 
 const EPS: f32 = 1e-4;
 
 impl<'a> TreeBuilder<'a> {
-    pub fn build(&mut self, board: &[Card]) -> Node {
+    pub fn build(&mut self, board: &[Card], valid: u32) -> Node {
         let street = (board.len() as u8).saturating_sub(3);
         let st = State {
             street,
@@ -234,6 +268,7 @@ impl<'a> TreeBuilder<'a> {
             street_base: [0.0; 2],
             to_act: OOP,
             raises: 0,
+            valid,
         };
         self.action(st)
     }
@@ -253,7 +288,7 @@ impl<'a> TreeBuilder<'a> {
         let street_contrib = st.contrib[p] - st.street_base[p];
 
         let mut out: Vec<Action> = Vec::new();
-        let mut push_aggr = |out: &mut Vec<Action>, mut add: f32, raise: bool| {
+        let push_aggr = |out: &mut Vec<Action>, mut add: f32, raise: bool| {
             if remaining <= EPS {
                 return;
             }
@@ -383,7 +418,27 @@ impl<'a> TreeBuilder<'a> {
         let all_in = (self.cfg.effective_stack - st.contrib[0]).abs() < EPS
             || (self.cfg.effective_stack - st.contrib[1]).abs() < EPS;
         let next_street = st.street + 1;
-        let cards: Vec<Card> = (0..52u8).filter(|c| !st.board.contains(c)).collect();
+        let available: Vec<Card> = (0..52u8).filter(|c| !st.board.contains(c)).collect();
+        let mut cards: Vec<Card> = Vec::new();
+        let mut iso_raw: Vec<(Card, Card, u8)> = Vec::new();
+        for &c in &available {
+            // canonical representative = smallest image under the valid symmetries
+            let (mut best, mut best_k) = (c, 0usize);
+            for (k, p) in self.perms.iter().enumerate() {
+                if st.valid & (1 << k) != 0 {
+                    let img = permute_card(p, c);
+                    if img < best {
+                        best = img;
+                        best_k = k;
+                    }
+                }
+            }
+            if best == c {
+                cards.push(c);
+            } else {
+                iso_raw.push((c, best, self.perm_inv[best_k]));
+            }
+        }
         let mut children = Vec::with_capacity(cards.len());
         for &c in &cards {
             let mut s = st.clone();
@@ -392,10 +447,17 @@ impl<'a> TreeBuilder<'a> {
             s.street_base = s.contrib;
             s.to_act = OOP;
             s.raises = 0;
+            s.valid = (0..self.perms.len())
+                .filter(|&k| st.valid & (1 << k) != 0 && permute_card(&self.perms[k], c) == c)
+                .fold(0u32, |m, k| m | (1 << k));
             children.push(if all_in { self.street_end(s) } else { self.action(s) });
         }
+        let iso = iso_raw
+            .into_iter()
+            .map(|(card, canon, perm)| IsoCard { card, child: cards.iter().position(|&x| x == canon).unwrap() as u16, perm })
+            .collect();
         self.stats.chance_nodes += 1;
-        Node::Chance(Box::new(ChanceNode { street: next_street, cards, children, contrib: st.contrib }))
+        Node::Chance(Box::new(ChanceNode { street: next_street, cards, children, iso, n_cards: available.len() as u8, contrib: st.contrib }))
     }
 }
 
