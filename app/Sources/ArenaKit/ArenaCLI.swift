@@ -8,7 +8,7 @@ public enum ArenaCLI {
 
     USAGE:
       eqbench arena match --a <player> --b <player> [--deals 50] [--seed 1] [--concurrency 4]
-                          [--stats] [--single] [--verbose] [--no-save]
+                          [--stack 100] [--stats] [--single] [--verbose] [--no-save]
       eqbench arena list                       Saved matches
       eqbench arena show <match-id> [hand#] [--probs]
                                                Summary, or a PokerStars-style hand history
@@ -82,6 +82,7 @@ public enum ArenaCLI {
         var config = MatchConfig()
         config.deals = Int(option("--deals", &args) ?? "") ?? 50
         config.seed = UInt64(option("--seed", &args) ?? "") ?? 1
+        config.stackBB = Double(option("--stack", &args) ?? "") ?? 100
         config.concurrency = Int(option("--concurrency", &args) ?? "") ?? 4
         config.duplicate = !flag("--single", &args)
         config.opponentStats = flag("--stats", &args)

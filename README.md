@@ -56,6 +56,12 @@ numbers are on the site, and `notes.json` has the full detail.
   0.55% of the pot; when they split 3–2, the loss is eight times higher. With the plain description,
   a majority vote beat the best single model (1.99% vs 2.57%) because the models' biases cancel.
   With the better description they agree far more (65% unanimous) and voting no longer adds much.
+- **Whether better play wins more money depends on the opponent.** Over ~15,000 paired full hands,
+  the better description made Mercury beat an over-aggressive "maniac" bot by a further
+  +275 ± 165 bb/100 (significant) but changed nothing against a solid regular (≈ +1 ± 11 over
+  3,250 deals). At 20bb the short-stack advice that helped against perfect play did not
+  transfer (Mercury −13 ± 12, Luna +13 ± 16). Playing a move at random by the model's own odds
+  instead of its top pick cost about 31 bb/100.
 - **No model reliably beats a solid regular bot in full hands.** Against the TAG bot (100bb,
   duplicate), Luna is at −21 ± 22 and Mercury at +2 ± 27 bb/100 over 1,000–2,000 hands. Every
   model beat the calling station. On identical deals the better description nudged win-rates up

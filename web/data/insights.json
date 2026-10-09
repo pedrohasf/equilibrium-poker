@@ -17,6 +17,19 @@
       "suite": "All stored answers (every suite, split and variant)"
     },
     {
+      "id": "confident-info",
+      "headline": "Better information makes them more sure — and still honest about it",
+      "big": "39% → 59%",
+      "bigLabel": "decisions where the model is ‘very sure’",
+      "text": "With the better description, models were very sure on 59% of decisions instead of 39%, and every confidence level got cheaper (very sure: 2.3% → 1.7% of the pot). Torn decisions still cost ~60% more — the warning light keeps working.",
+      "href": "#confidence",
+      "evidence": "See the confidence chart",
+      "stats": "All five models, five full-hand suites, v2 (n=4,941) vs nuts (n=4,336): >80% bucket 39% → 59% of decisions, loss 2.33 → 1.72% pot; 60–80% 3.13 → 2.13%; 40–60% 4.15 → 2.80%; best-pick rate 78/69/64% → 78/73/71%.",
+      "n": "9,277 answers",
+      "ci": "",
+      "suite": "Cash dev/test, MTT 40/20bb, Spin full hands"
+    },
+    {
       "id": "description",
       "headline": "How you describe the hand matters as much as which model you use",
       "big": "−30–50%",
@@ -58,13 +71,13 @@
     },
     {
       "id": "money",
-      "headline": "Closer to perfect ≠ more money",
-      "big": "+4 ± 33",
-      "bigLabel": "Luna's big blinds per 100 hands vs. a solid regular",
-      "text": "No model reliably beats a solid regular bot over full hands (Luna −21 ± 22, Mercury +2 ± 27 bb/100). The improved description nudged results up on identical deals (+6 to +10 bb/100) but within the margin of error. Every model crushes a calling station.",
+      "headline": "Closer to perfect ≠ more money — it depends on the opponent",
+      "big": "+275",
+      "bigLabel": "bb/100 vs a maniac",
+      "text": "Over ~15,000 full hands, the better description made Mercury crush an over-aggressive bot far harder (+275 bb/100, significant) but changed nothing against a solid regular (≈0). No model reliably beats the solid regular; every model beats a calling station.",
       "href": "#arena",
       "evidence": "See the arena",
-      "stats": "Duplicate matches vs TAG bot, identical deals, paired plus − standard: Mercury +9.5 ± 17.7 bb/100 (1,000 deals), Luna +5.7 ± 23.9 (500 deals). Standard: Luna −20.5 ± 21.8, Mercury +1.8 ± 27.4; plus: Luna −14.8 ± 29.1, Mercury +11.3 ± 23.6.",
+      "stats": "Paired on identical deals, ~plus − standard: Mercury vs maniac +274.8 ± 165.0 (500 deals); vs TAG @100bb pooled ≈ +1 ± 11 (3,250 deals: +9.5 ± 17.7, −0.0 ± 16.3, −26.5 ± 45.3); vs TAG @20bb −13.4 ± 12.3 (1,000 deals). Luna vs TAG: +5.7 ± 23.9 @100bb (500), +12.7 ± 15.6 @20bb (400). Standard vs TAG: Mercury +22 ± 19 (2,000 deals), Luna −21 ± 22 (500).",
       "n": "100–250 duplicate deals per match",
       "ci": "±33 to ±62 bb/100",
       "suite": "Arena, 100bb heads-up"
@@ -160,6 +173,19 @@
       "n": "",
       "ci": "",
       "suite": "200-spot suite and arena"
+    },
+    {
+      "id": "mixing",
+      "headline": "Rolling the dice on their own odds doesn't pay",
+      "big": "−31",
+      "bigLabel": "bb/100 vs top pick",
+      "text": "Decision models return a probability for every move. Playing a move at random according to those odds — instead of just taking the favourite — cost Mercury about 31 big blinds per 100 hands against the solid bot. Their probabilities are informative, but too spread out to play as-is.",
+      "href": "#arena",
+      "evidence": "See the arena",
+      "stats": "Mercury ~mix − argmax vs TAG @100bb: −31.2 ± 40.2 bb/100 (1,000 deals, paired; not significant). Benchmark: playing the reported mix loses more EV than the argmax pick for every model; sharpening (τ=4) recovers most of it.",
+      "n": "2,000 hands",
+      "ci": "−31.2 ± 40.2",
+      "suite": "Arena, 100bb duplicate"
     }
   ]
 }
