@@ -1,0 +1,15 @@
+{
+  "board": "Qs Jh 2h",
+  "range_oop": "22-99:0.75,TT-QQ:0.5,A2s-A9s,ATs-AJs:0.6,K2s-K9s,KTs-KQs:0.75,Q5s-QJs,J7s-JTs,T7s-T9s,96s-98s,85s-87s,74s-76s,64s-65s,53s-54s,A2o-A9o:0.6,ATo-AQo:0.75,K9o-KJo:0.8,Q9o-QJo,J9o-JTo,T9o,98o:0.5",
+  "range_ip": "22+,A2s+,K2s+,Q4s+,J6s+,T6s+,96s+,85s+,75s+,64s+,54s,A5o+,K9o+,Q9o+,J9o+,T9o",
+  "starting_pot": 5.5,
+  "effective_stack": 97.5,
+  "allin_threshold": 0.67,
+  "add_allin": true,
+  "raise_limit": 3,
+  "bet_sizes": {
+    "flop":  { "oop": { "bet": "33", "raise": "60" }, "ip": { "bet": "33,75", "raise": "60" } },
+    "turn":  { "oop": { "bet": "66", "raise": "60" }, "ip": { "bet": "66", "raise": "60" } },
+    "river": { "oop": { "bet": "75", "raise": "60" }, "ip": { "bet": "75", "raise": "60" } }
+  }
+}

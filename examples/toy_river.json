@@ -1,0 +1,9 @@
+{
+  "board": "2c 3d 7h 8s Kc",
+  "range_oop": "QQ",
+  "range_ip": "KK,54s",
+  "starting_pot": 10,
+  "effective_stack": 10,
+  "add_allin": false,
+  "bet_sizes": { "river": { "oop": { "bet": "", "raise": "" }, "ip": { "bet": "100", "raise": "" } } }
+}
