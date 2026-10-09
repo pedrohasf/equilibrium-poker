@@ -9,13 +9,39 @@ public enum APIKeyStore {
     private static let service = "app.equilibrium.openrouter"
     private static let account = "api-key"
 
+    /// Lookup order: environment, a `.env` file (current directory or next to the app, walking up), keychain.
     public static var current: String? {
         if let env = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"], !env.isEmpty { return env }
+        if let file = dotEnvValue { return file }
         return keychainValue
     }
 
+    /// `OPENROUTER_API_KEY` from the nearest `.env`, searching up from the working directory and the app bundle.
+    public static var dotEnvValue: String? {
+        let starts = [URL(fileURLWithPath: FileManager.default.currentDirectoryPath), Bundle.main.bundleURL]
+        for start in starts {
+            var dir = start
+            for _ in 0..<6 {
+                let file = dir.appendingPathComponent(".env")
+                if let text = try? String(contentsOf: file, encoding: .utf8) {
+                    for line in text.split(whereSeparator: \.isNewline) {
+                        var l = line.trimmingCharacters(in: .whitespaces)
+                        if l.hasPrefix("export ") { l = String(l.dropFirst(7)) }
+                        guard l.hasPrefix("OPENROUTER_API_KEY=") else { continue }
+                        let v = l.dropFirst("OPENROUTER_API_KEY=".count).trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+                        if !v.isEmpty { return v }
+                    }
+                }
+                let parent = dir.deletingLastPathComponent()
+                if parent.path == dir.path { break }
+                dir = parent
+            }
+        }
+        return nil
+    }
+
     public static var isFromEnvironment: Bool {
-        !(ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"] ?? "").isEmpty
+        !(ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"] ?? "").isEmpty || dotEnvValue != nil
     }
 
     public static var keychainValue: String? {

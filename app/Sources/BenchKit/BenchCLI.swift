@@ -19,6 +19,11 @@ public enum BenchCLI {
       eqbench bench report [--suite <id|file>]     Leaderboard (default: newest suite)
       eqbench bench show --suite <id> --decision d001   One decision: GTO, EVs and every answer
       eqbench bench state --suite <id> [--decision d001] [--model id]  Print the JSON state + question sent to decision models
+      eqbench bench export [--suite <id|file>] [--out web/data/results.json] [--pretty] [--no-catalog]
+                        One JSON for the static results site: suite metadata, scored leaderboard
+                        (Scoring), breakdowns, cost/latency and every decision with all answers.
+                        Default: newest suite → <repo>/web/data/results.json. Names/prices come from
+                        the live catalog when a key is available (--no-catalog skips it). No secrets.
 
     Streets: flop, turn, river (flop solves take minutes). Scenarios: \(Scenarios.all.map(\.id).joined(separator: ", ")).
     Suites and runs are stored in ~/Library/Application Support/Equilibrium/{suites,runs}. Runs resume automatically.
@@ -35,6 +40,7 @@ public enum BenchCLI {
         case "report", "leaderboard": try report(opts)
         case "show": try show(opts)
         case "state": try state(opts)
+        case "export": try await export(opts)
         case "decision-models", "dms": try await listDecisionModels()
         default: print(help)
         }
@@ -234,6 +240,35 @@ public enum BenchCLI {
         print("// \(d.id) · \(d.headline) · state v\(DecisionStateBuilder.version) · ~\(DecisionStateBuilder.estimatedInputTokens(d)) input tokens")
         print("// POST https://openrouter.ai/api/alpha/decisions (question id is never shown to the model)")
         print(DecisionStateBuilder.requestBody(d, model: o["model"] ?? DecisionRoster.suggested[0]).prettyText)
+    }
+
+    static func export(_ o: Options) async throws {
+        let suite = try suite(o)
+        let runs = BenchStore.runs(suiteId: suite.id)
+        var catalog: [String: BenchExport.CatalogEntry] = [:]
+        if !o.flags.contains("no-catalog"), runs.contains(where: { $0.kind == .decisionModel }),
+           let client = try? OpenRouterClient.fromStoredKey() {
+            // Best effort with a short timeout: the export must work offline.
+            let models: [ModelInfo]? = await withTaskGroup(of: [ModelInfo]?.self) { g in
+                g.addTask { try? await client.decisionModels() }
+                g.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return nil }
+                let first = await g.next() ?? nil
+                g.cancelAll()
+                return first
+            }
+            for m in models ?? [] { catalog[m.id] = .init(name: m.name, promptPricePerM: m.promptPricePerM) }
+            print(models == nil ? "  catalog unavailable — using billed cost for prices" : "  catalog: \(catalog.count) decision models")
+        }
+        let doc = BenchExport.document(suite: suite, runs: runs, catalog: catalog)
+        let url = o["out"].map { URL(fileURLWithPath: $0) } ?? BenchExport.defaultOutputURL()
+        try BenchExport.write(doc, to: url, pretty: o.flags.contains("pretty"))
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        let players = runs.filter { !$0.results.isEmpty }
+        print("Exported \(suite.id) · \(suite.decisions.count) decisions · \(players.count) players "
+              + "(\(players.filter { $0.kind == .decisionModel }.count) decision models) → \(url.path) (\(size / 1024) KB)")
+        for r in players where r.results.count < suite.decisions.count {
+            print("  note: \(r.displayName) answered \(r.results.count)/\(suite.decisions.count) — re-export when it finishes")
+        }
     }
 
     // MARK: Output

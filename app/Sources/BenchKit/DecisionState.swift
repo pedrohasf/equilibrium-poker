@@ -10,7 +10,7 @@ import SolverKit
 /// draws). Each legal action becomes one self-contained `criteria` entry with a readable key.
 /// Bump `version` whenever the state or question wording changes.
 public enum DecisionStateBuilder {
-    public static let version = 1
+    public static let version = 2
     /// Question id (never shown to the model).
     public static let questionId = "action"
 
@@ -100,7 +100,7 @@ public enum DecisionStateBuilder {
                 + "and leaving \(BB.fmt(max(0, heroStack - a.amount))) bb behind; the villain must call \(BB.fmt(max(0, a.amount - d.toCall))) bb more, fold, or re-raise. "
                 + "Right with hands strong enough to get called by worse, or as a bluff with hands that block the villain's strongest holdings and do poorly when just calling."
         case .allin:
-            return "All-in for \(BB.fmt(a.amount)) bb (\(d.facingBet ? "a raise of \(pct) of the pot after calling" : "\(pct) of the pot"))): the hero commits the whole remaining stack, making the pot \(BB.fmt(pot + a.amount)) bb; "
+            return "All-in for \(BB.fmt(a.amount)) bb (\(d.facingBet ? "a raise of \(pct) of the pot after calling" : "\(pct) of the pot")): the hero commits the whole remaining stack, making the pot \(BB.fmt(pot + a.amount)) bb; "
                 + "the villain can only call or fold. Right with the very strongest hands, or as a bluff when the villain folds often enough."
         }
     }

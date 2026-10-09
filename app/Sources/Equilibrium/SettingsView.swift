@@ -25,7 +25,7 @@ struct SettingsView: View {
                     if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
                 }
                 if APIKeyStore.isFromEnvironment {
-                    Label("OPENROUTER_API_KEY is set in the environment and takes precedence.", systemImage: "info.circle")
+                    Label("OPENROUTER_API_KEY is set (environment or .env) and takes precedence.", systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } header: {
