@@ -186,6 +186,19 @@
       "n": "2,000 hands",
       "ci": "−31.2 ± 40.2",
       "suite": "Arena, 100bb duplicate"
+    },
+    {
+      "id": "hud",
+      "headline": "Giving them opponent stats backfired",
+      "big": "−79",
+      "bigLabel": "bb/100 vs a calling station",
+      "text": "Real players exploit opponents using stats (how often they fold, bet, call). When we fed the model a live summary of its opponent's tendencies, it didn't exploit better — against a calling station it won 79 big blinds per 100 hands less. It seems to over-adjust.",
+      "href": "#arena",
+      "evidence": "See the arena",
+      "stats": "Mercury ~plus, opponent-stats summary on vs off, paired on identical deals: vs calling station −78.9 ± 44.4 bb/100 (500 deals, significant); vs TAG +9.1 ± 12.1 (1,000 deals); vs maniac −93.3 ± 194.2 (500 deals).",
+      "n": "4,000 hands",
+      "ci": "−78.9 ± 44.4",
+      "suite": "Arena, 100bb duplicate"
     }
   ]
 }

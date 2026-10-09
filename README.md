@@ -62,6 +62,9 @@ numbers are on the site, and `notes.json` has the full detail.
   3,250 deals). At 20bb the short-stack advice that helped against perfect play did not
   transfer (Mercury −13 ± 12, Luna +13 ± 16). Playing a move at random by the model's own odds
   instead of its top pick cost about 31 bb/100.
+- **Giving them opponent stats backfired.** Feeding the model a live summary of its opponent's
+  tendencies (like a poker HUD) cost Mercury 79 ± 44 bb/100 against a calling station and did
+  nothing against the solid regular: it over-adjusts rather than exploits.
 - **No model reliably beats a solid regular bot in full hands.** Against the TAG bot (100bb,
   duplicate), Luna is at −21 ± 22 and Mercury at +2 ± 27 bb/100 over 1,000–2,000 hands. Every
   model beat the calling station. On identical deals the better description nudged win-rates up
