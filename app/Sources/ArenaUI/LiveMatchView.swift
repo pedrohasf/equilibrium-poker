@@ -159,7 +159,7 @@ struct ReasoningPanel: View {
                 }
                 .padding(.top, 8)
             } label: {
-                Label("Thinking", systemImage: "brain").font(.headline)
+                Label(live.specs.contains { $0.kind == .decision } ? "Thinking & decisions" : "Thinking", systemImage: "brain").font(.headline)
             }
         }
     }
@@ -169,9 +169,24 @@ struct ReasoningPanel: View {
             HStack(spacing: 6) {
                 PlayerDot(player: p)
                 Text(live.name(p)).font(.subheadline.weight(.semibold))
+                if live.specs[p].kind == .decision { DecisionBadge(mode: live.specs[p].mode) }
                 Spacer()
-                if let r = live.reasoning[p] { Text("hand #\(r.hand)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                if live.specs[p].kind == .decision, let d = live.decisions[p] {
+                    Text("hand #\(d.hand)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                } else if let r = live.reasoning[p] { Text("hand #\(r.hand)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
             }
+            if live.specs[p].kind == .decision {
+                Group {
+                    if let d = live.decisions[p] {
+                        DecisionProbabilityView(trace: d.trace, fallback: d.fallback, compact: true)
+                    } else {
+                        Text(live.table.thinking == p ? "Deciding…" : "Action probabilities appear here.")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .frame(minHeight: 96, alignment: .top)
+            } else {
             ScrollView {
                 Text(live.reasoning[p]?.text ?? (live.specs[p].kind == .llm ? "No reasoning yet." : "Bot rationale appears here."))
                     .font(.callout)
@@ -180,7 +195,8 @@ struct ReasoningPanel: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(height: 96)
-            if let t = live.reasoning[p]?.thinking, !t.isEmpty {
+            }
+            if let t = live.reasoning[p]?.thinking, !t.isEmpty, live.specs[p].kind != .decision {
                 DisclosureGroup("Hidden reasoning") {
                     ScrollView {
                         Text(t).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)

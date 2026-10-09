@@ -19,6 +19,21 @@ public struct DecisionScore: Hashable, Sendable {
     public var blunder: Bool
     /// GTO frequency of the chosen action (0 if invalid).
     public var gtoFrequency: Double
+
+    // Distribution metrics — set for players that report action probabilities (decision models,
+    // sampled GTO). Invalid answers from such players score as the worst case (spread / 1 / 0).
+    /// Σ p(a)·loss(a), bb: EV lost if the player *played* its distribution instead of the argmax.
+    public var mixedEVLoss: Double? = nil
+    /// `mixedEVLoss` as a fraction of the pot.
+    public var mixedEVLossPot: Double? = nil
+    /// Total-variation distance ½Σ|p − gto| to the equilibrium strategy of hero's hand, in [0, 1].
+    public var tvDistance: Double? = nil
+    /// Probability mass the player puts on best-EV actions (within `bestTolerance`).
+    public var bestActionProbability: Double? = nil
+    /// Model-reported confidence in its choice.
+    public var confidence: Double? = nil
+
+    public var hasDistribution: Bool { mixedEVLoss != nil }
 }
 
 /// Aggregate over a set of decisions.
@@ -35,6 +50,16 @@ public struct ScoreBucket: Codable, Hashable, Sendable {
     public var approvedRate: Double
     public var blunderRate: Double
     public var invalidRate: Double
+    /// Decisions with distribution metrics (0 for argmax-only players; then the fields below are nil).
+    public var distributionN: Int = 0
+    public var meanMixedEVLoss: Double? = nil
+    public var meanMixedEVLossPot: Double? = nil
+    public var meanMixedEVLossPotCI: Double? = nil
+    public var meanTVDistance: Double? = nil
+    public var meanTVDistanceCI: Double? = nil
+    /// Calibration: mean probability assigned to the best-EV action(s).
+    public var meanBestActionProbability: Double? = nil
+    public var meanConfidence: Double? = nil
 
     public static let empty = ScoreBucket(n: 0, meanEVLoss: 0, meanEVLossCI: 0, meanEVLossPot: 0, meanEVLossPotCI: 0,
                                           gtoScore: 0, gtoScoreCI: 0, accuracy: 0, approvedRate: 0, blunderRate: 0, invalidRate: 0)
@@ -60,6 +85,8 @@ public struct ModelScore: Codable, Hashable, Sendable, Identifiable {
     public var isComplete: Bool { answered >= total }
     public var totalTokens: Int { promptTokens + completionTokens }
     public var isBaseline: Bool { kind == .baseline }
+    public var isDecisionModel: Bool { kind == .decisionModel }
+    public var hasDistribution: Bool { overall.distributionN > 0 }
 }
 
 public enum Scoring {
@@ -68,6 +95,62 @@ public enum Scoring {
     public static let bestTolerance = 0.0025
     public static let approvedFrequency = 0.10
     public static let blunderThreshold = 0.25
+
+    // MARK: Distribution metrics (pure)
+
+    /// Clamps negatives / non-finite values to 0 and rescales to sum 1; nil if nothing positive is left.
+    public static func normalized(_ p: [Double]) -> [Double]? {
+        let c = p.map { $0.isFinite && $0 > 0 ? $0 : 0 }
+        let sum = c.reduce(0, +)
+        guard sum > 0 else { return nil }
+        return c.map { $0 / sum }
+    }
+
+    /// Σ p(a)·loss(a) in bb for a (normalised) distribution over the decision's actions.
+    public static func mixedEVLoss(_ d: Decision, probabilities p: [Double]) -> Double {
+        zip(p, d.actions.indices).reduce(0) { $0 + $1.0 * d.evLoss($1.1) }
+    }
+
+    /// ½Σ|p − q| over aligned vectors (missing entries count as 0).
+    public static func totalVariation(_ p: [Double], _ q: [Double]) -> Double {
+        (0..<max(p.count, q.count)).reduce(0) { acc, i in
+            acc + abs((i < p.count ? p[i] : 0) - (i < q.count ? q[i] : 0))
+        } / 2
+    }
+
+    /// Mass on actions within `bestTolerance` of the pot of the best EV.
+    public static func bestActionProbability(_ d: Decision, probabilities p: [Double]) -> Double {
+        let tol = bestTolerance * max(d.pot, 1e-9)
+        return zip(p, d.actions.indices).reduce(0) { $0 + (d.evLoss($1.1) <= tol ? $1.0 : 0) }
+    }
+
+    /// Argmax metrics, plus distribution metrics when `probabilities` is given or `probabilistic`
+    /// is set (a probabilistic player's invalid answer scores as the worst distribution).
+    public static func score(_ d: Decision, choice: Int?, probabilities: [Double]? = nil, probabilistic: Bool = false,
+                             confidence: Double? = nil) -> DecisionScore {
+        var s = score(d, choice: choice)
+        let pot = max(d.pot, 1e-9)
+        if s.valid, let raw = probabilities, raw.count == d.actions.count, let p = normalized(raw) {
+            let m = mixedEVLoss(d, probabilities: p)
+            s.mixedEVLoss = m
+            s.mixedEVLossPot = m / pot
+            s.tvDistance = normalized(d.strategy).map { totalVariation(p, $0) }
+            s.bestActionProbability = bestActionProbability(d, probabilities: p)
+            s.confidence = confidence
+        } else if probabilistic || probabilities != nil {
+            s.mixedEVLoss = d.evSpread
+            s.mixedEVLossPot = d.evSpread / pot
+            s.tvDistance = 1
+            s.bestActionProbability = 0
+        }
+        return s
+    }
+
+    /// Scores one stored result. Old sampled-GTO runs (no stored probabilities) use the hand's strategy.
+    public static func score(_ d: Decision, result r: DecisionResult, run: BenchmarkRun) -> DecisionScore {
+        let probs = r.actionProbabilities ?? (run.model == Baseline.gto.id ? d.strategy : nil)
+        return score(d, choice: r.choice, probabilities: probs, probabilistic: run.kind == .decisionModel, confidence: r.confidence)
+    }
 
     public static func score(_ d: Decision, choice: Int?) -> DecisionScore {
         let valid = choice.map { d.actions.indices.contains($0) } ?? false
@@ -99,9 +182,27 @@ public enum Scoring {
         let lossPot = meanCI(scores.map(\.evLossPot))
         let gto = meanCI(scores.map { $0.score * 100 })
         func rate(_ f: (DecisionScore) -> Bool) -> Double { Double(scores.filter(f).count) / n }
-        return ScoreBucket(n: scores.count, meanEVLoss: loss.mean, meanEVLossCI: loss.ci, meanEVLossPot: lossPot.mean,
-                           meanEVLossPotCI: lossPot.ci, gtoScore: gto.mean, gtoScoreCI: gto.ci, accuracy: rate(\.isBest),
-                           approvedRate: rate(\.approved), blunderRate: rate(\.blunder), invalidRate: rate { !$0.valid })
+        var b = ScoreBucket(n: scores.count, meanEVLoss: loss.mean, meanEVLossCI: loss.ci, meanEVLossPot: lossPot.mean,
+                            meanEVLossPotCI: lossPot.ci, gtoScore: gto.mean, gtoScoreCI: gto.ci, accuracy: rate(\.isBest),
+                            approvedRate: rate(\.approved), blunderRate: rate(\.blunder), invalidRate: rate { !$0.valid })
+        let dist = scores.filter(\.hasDistribution)
+        if !dist.isEmpty {
+            b.distributionN = dist.count
+            b.meanMixedEVLoss = meanCI(dist.compactMap(\.mixedEVLoss)).mean
+            let mp = meanCI(dist.compactMap(\.mixedEVLossPot))
+            b.meanMixedEVLossPot = mp.mean
+            b.meanMixedEVLossPotCI = mp.ci
+            let tvs = dist.compactMap(\.tvDistance)
+            if !tvs.isEmpty {
+                let tv = meanCI(tvs)
+                b.meanTVDistance = tv.mean
+                b.meanTVDistanceCI = tv.ci
+            }
+            b.meanBestActionProbability = meanCI(dist.compactMap(\.bestActionProbability)).mean
+            let conf = dist.compactMap(\.confidence)
+            if !conf.isEmpty { b.meanConfidence = meanCI(conf).mean }
+        }
+        return b
     }
 
     /// Per-decision scores for a run (only decisions it has answered).
@@ -109,7 +210,7 @@ public enum Scoring {
         let byId = Dictionary(run.results.map { ($0.decisionId, $0) }, uniquingKeysWith: { _, b in b })
         return suite.decisions.compactMap { d in
             guard let r = byId[d.id] else { return nil }
-            return (d, score(d, choice: r.choice))
+            return (d, score(d, result: r, run: run))
         }
     }
 

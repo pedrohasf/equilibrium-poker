@@ -42,7 +42,7 @@ enum Section: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .solver: return "Solver"
-        case .benchmarks: return "LLM Benchmarks"
+        case .benchmarks: return "Model Benchmarks"
         case .arena: return "Arena"
         }
     }
@@ -50,7 +50,7 @@ enum Section: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .solver: return "Postflop GTO"
-        case .benchmarks: return "EV loss vs. GTO"
+        case .benchmarks: return "Decision models vs. GTO"
         case .arena: return "Heads-up matches"
         }
     }

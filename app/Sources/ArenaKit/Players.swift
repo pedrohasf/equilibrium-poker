@@ -70,38 +70,62 @@ public enum BotKind: String, CaseIterable, Codable, Sendable {
     }
 }
 
-/// Serializable description of a participant: a bot or an OpenRouter model.
+/// How a decision-model player turns the returned probabilities into an action.
+public enum DecisionMode: String, Codable, Sendable, CaseIterable {
+    /// Play the model's top choice.
+    case argmax
+    /// Sample from the returned probabilities (seeded), i.e. play a randomized strategy.
+    case mixed
+
+    public var title: String { self == .argmax ? "Argmax" : "Mixed" }
+}
+
+/// Serializable description of a participant: a bot, an OpenRouter chat model or a System One decision model.
 public struct PlayerSpec: Codable, Hashable, Sendable, Identifiable {
-    public enum Kind: String, Codable, Sendable { case bot, llm }
+    public enum Kind: String, Codable, Sendable { case bot, llm, decision }
 
     public var kind: Kind
-    /// Bot raw value ("tag") or OpenRouter model id ("openai/gpt-5").
+    /// Bot raw value ("tag") or OpenRouter model id ("openai/gpt-5", "typesafe/jev-1.13").
     public var model: String
     public var reasoningEffort: String?
+    /// Decision models only (nil = argmax). Optional so matches saved before decision models still decode.
+    public var decisionMode: DecisionMode?
 
-    public init(kind: Kind, model: String, reasoningEffort: String? = nil) {
+    public init(kind: Kind, model: String, reasoningEffort: String? = nil, decisionMode: DecisionMode? = nil) {
         self.kind = kind
         self.model = model
         self.reasoningEffort = reasoningEffort
+        self.decisionMode = decisionMode
     }
 
     public static func bot(_ b: BotKind) -> PlayerSpec { PlayerSpec(kind: .bot, model: b.rawValue) }
     public static func llm(_ model: String, effort: String? = nil) -> PlayerSpec { PlayerSpec(kind: .llm, model: model, reasoningEffort: effort) }
+    public static func decision(_ model: String, mode: DecisionMode = .argmax) -> PlayerSpec {
+        PlayerSpec(kind: .decision, model: model, decisionMode: mode)
+    }
 
-    /// Stable key used by the leaderboard: "bot:tag", "openai/gpt-5", "openai/gpt-5@low".
+    public var isDecisionModel: Bool { kind == .decision }
+    /// True for anything that calls OpenRouter (needs an API key).
+    public var usesOpenRouter: Bool { kind != .bot }
+    public var mode: DecisionMode { decisionMode ?? .argmax }
+
+    /// Stable key used by the leaderboard: "bot:tag", "openai/gpt-5", "openai/gpt-5@low",
+    /// "dm:typesafe/jev-1.13", "dm:typesafe/jev-1.13~mix".
     public var id: String {
         switch kind {
         case .bot: return "bot:\(model)"
         case .llm: return model + (reasoningEffort.map { "@\($0)" } ?? "")
+        case .decision: return "dm:\(model)" + (mode == .mixed ? "~mix" : "")
         }
     }
 
     public var bot: BotKind? { kind == .bot ? BotKind(rawValue: model) : nil }
 
-    /// Short display name ("gpt-5", "TAG bot").
+    /// Short display name ("gpt-5", "TAG bot", "jev-1.13 · mixed").
     public var displayName: String {
         if let b = bot { return b.title }
         let base = String(model.split(separator: "/").last ?? Substring(model))
+        if kind == .decision { return base + (mode == .mixed ? " · mixed" : "") }
         return base + (reasoningEffort.map { " · \($0)" } ?? "")
     }
 
@@ -110,7 +134,9 @@ public struct PlayerSpec: Codable, Hashable, Sendable, Identifiable {
         kind == .bot ? "bot" : String(model.split(separator: "/").first ?? "")
     }
 
-    /// Parses "bot:tag", "tag", "random", "openai/gpt-5", "openai/gpt-5@low".
+    /// Parses "bot:tag", "tag", "random", "openai/gpt-5", "openai/gpt-5@low",
+    /// "dm:typesafe/jev-1.13", "dm:typesafe/jev-1.13~mix" (a bare "<id>~mix" is also a decision model).
+    /// Plain ids parse as chat models; use `resolvingDecisionModels` to auto-detect decision models.
     public static func parse(_ text: String) -> PlayerSpec? {
         let t = text.trimmingCharacters(in: .whitespaces)
         guard !t.isEmpty else { return nil }
@@ -120,15 +146,43 @@ public struct PlayerSpec: Codable, Hashable, Sendable, Identifiable {
                                           "maniac": .maniac, "random": .random]
         if let b = aliases[botName] { return .bot(b) }
         if lower.hasPrefix("bot:") { return nil }
-        guard t.contains("/") else { return nil }
-        let parts = t.split(separator: "@", maxSplits: 1).map(String.init)
+
+        var body = t
+        var isDecision = false
+        for prefix in ["dm:", "decision:"] where lower.hasPrefix(prefix) {
+            body = String(t.dropFirst(prefix.count))
+            isDecision = true
+        }
+        var mode: DecisionMode?
+        if let r = body.range(of: "~", options: .backwards) {
+            switch body[r.upperBound...].lowercased() {
+            case "mix", "mixed", "sample": mode = .mixed
+            case "argmax", "max", "top": mode = .argmax
+            default: return nil
+            }
+            body = String(body[..<r.lowerBound])
+            isDecision = true
+        }
+        guard body.contains("/") else { return nil }
+        if isDecision {
+            guard !body.contains("@") else { return nil }
+            return .decision(body, mode: mode ?? .argmax)
+        }
+        let parts = body.split(separator: "@", maxSplits: 1).map(String.init)
         return .llm(parts[0], effort: parts.count > 1 ? parts[1] : nil)
+    }
+
+    /// Turns a plain chat spec into a decision spec when its id is a known decision model.
+    public func resolvingDecisionModels(_ decisionIDs: Set<String>) -> PlayerSpec {
+        guard kind == .llm, reasoningEffort == nil, decisionIDs.contains(model) else { return self }
+        return .decision(model)
     }
 }
 
 public enum PlayerFactory {
-    /// Builds a player. LLM players require a chat provider.
-    public static func make(_ spec: PlayerSpec, chat: (any ChatProvider)?, options: LLMPlayer.Options = .init()) throws -> any ArenaPlayer {
+    /// Builds a player. LLM players require a chat provider; decision models a decision provider.
+    public static func make(_ spec: PlayerSpec, chat: (any ChatProvider)?, decisions: (any DecisionProvider)? = nil,
+                            options: LLMPlayer.Options = .init()) throws -> any ArenaPlayer {
         switch spec.kind {
         case .bot:
             switch spec.bot {
@@ -143,6 +197,12 @@ public enum PlayerFactory {
             var o = options
             o.chat.reasoningEffort = spec.reasoningEffort ?? o.chat.reasoningEffort
             return LLMPlayer(model: spec.model, options: o, client: chat)
+        case .decision:
+            guard let decisions = decisions ?? (chat as? any DecisionProvider) else {
+                throw EngineError("an OpenRouter API key is required for \(spec.model)")
+            }
+            return DecisionModelPlayer(model: spec.model, mode: spec.mode, includeMatchSummary: options.includeMatchSummary,
+                                       client: decisions)
         }
     }
 }

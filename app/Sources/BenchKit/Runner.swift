@@ -96,6 +96,8 @@ public struct RunProgress: Sendable, Hashable {
     /// Running mean EV loss, % of pot.
     public var evLossPot: Double
     public var cost: Double
+    /// Running mean mixed-strategy EV loss, % of pot (players that report probabilities only).
+    public var mixedEVLossPot: Double? = nil
     public var lastDecisionId: String?
     public var lastError: String?
 
@@ -111,29 +113,37 @@ actor RunRecorder {
     private var scoreSum = 0.0
     private var lossSum = 0.0
     private var invalid = 0
+    private var mixedSum = 0.0
+    private var mixedN = 0
     private var lastError: String?
 
     init(run: BenchmarkRun, suite: BenchmarkSuite, persist: Bool) {
         self.run = run
         self.suite = suite
         self.persist = persist
-        let prior = Scoring.scores(run, suite: suite).map(\.1)
-        scoreSum = prior.reduce(0) { $0 + $1.score * 100 }
-        lossSum = prior.reduce(0) { $0 + $1.evLossPot }
-        invalid = prior.filter { !$0.valid }.count
+        for s in Scoring.scores(run, suite: suite).map(\.1) { Self.add(s, &scoreSum, &lossSum, &invalid, &mixedSum, &mixedN) }
     }
 
-    private func accumulate(_ s: DecisionScore) {
+    private static func add(_ s: DecisionScore, _ scoreSum: inout Double, _ lossSum: inout Double, _ invalid: inout Int,
+                            _ mixedSum: inout Double, _ mixedN: inout Int) {
         scoreSum += s.score * 100
         lossSum += s.evLossPot
         if !s.valid { invalid += 1 }
+        if let m = s.mixedEVLossPot {
+            mixedSum += m
+            mixedN += 1
+        }
+    }
+
+    private func accumulate(_ s: DecisionScore) {
+        Self.add(s, &scoreSum, &lossSum, &invalid, &mixedSum, &mixedN)
     }
 
     func add(_ r: DecisionResult) -> RunProgress {
         run.results.removeAll { $0.decisionId == r.decisionId }
         run.results.append(r)
         run.updatedAt = Date()
-        if let d = suite.decision(r.decisionId) { accumulate(Scoring.score(d, choice: r.choice)) }
+        if let d = suite.decision(r.decisionId) { accumulate(Scoring.score(d, result: r, run: run)) }
         if let e = r.error { lastError = e }
         unsaved += 1
         if persist && unsaved >= 5 { flush() }
@@ -151,6 +161,7 @@ actor RunRecorder {
         return RunProgress(runId: run.id, model: run.model, label: run.label, kind: run.kind, done: done, total: suite.decisions.count,
                            invalid: invalid, score: done == 0 ? 0 : scoreSum / Double(done),
                            evLossPot: done == 0 ? 0 : lossSum / Double(done), cost: run.totalCost,
+                           mixedEVLossPot: mixedN == 0 ? nil : mixedSum / Double(mixedN),
                            lastDecisionId: last, lastError: lastError)
     }
 }

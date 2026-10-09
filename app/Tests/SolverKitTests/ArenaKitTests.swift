@@ -374,4 +374,218 @@ final class ArenaKitTests: XCTestCase {
         XCTAssertEqual(tag.netBB, -rnd.netBB, accuracy: 1e-9)
         XCTAssertEqual(tag.wins, rnd.losses)
     }
+
+    // MARK: Decision models
+
+    /// Answers every decision with `respond(keys)`; records states and questions.
+    struct MockDecider: DecisionProvider {
+        let respond: @Sendable (_ keys: [String], _ call: Int) -> DecisionAnswer?
+        var fail = false
+        let log = Log()
+        final class Log: @unchecked Sendable {
+            let lock = NSLock()
+            var calls = 0
+            var states: [JSONValue] = []
+            var questions: [DecisionQuestion] = []
+        }
+
+        func decide(model: String, state: JSONValue, questions: [String: DecisionQuestion]) async throws -> DecideResult {
+            let n: Int = log.lock.withLock {
+                log.calls += 1
+                log.states.append(state)
+                log.questions.append(contentsOf: questions.values)
+                return log.calls - 1
+            }
+            if fail { throw EngineError("boom") }
+            guard case .choice(_, let criteria) = questions.values.first! else { fatalError() }
+            let keys = criteria.keys.sorted()
+            var answers: [String: DecisionAnswer] = [:]
+            if let a = respond(keys, n) { answers[questions.keys.first!] = a }
+            return DecideResult(model: model, answers: answers, usage: ChatUsage(promptTokens: 400, cost: 0.0002), latency: 0.1, raw: "{}")
+        }
+    }
+
+    func testDecisionKeysAndCriteria() throws {
+        let s = hand()
+        let ctx = context(s)
+        let keys = DecisionPrompt.keys(for: ctx.menu)
+        XCTAssertEqual(keys, ["fold", "call", "raise_to_2.5bb", "raise_to_3bb", "raise_to_4bb", "allin"])
+        guard case .choice(_, let criteria) = DecisionPrompt.question(for: ctx) else { return XCTFail() }
+        XCTAssertEqual(Set(criteria.keys), Set(keys))
+        XCTAssertTrue(criteria["call"]!.contains("limp"))
+        XCTAssertTrue(criteria["raise_to_3bb"]!.contains("Open-raise to 3 bb"))
+
+        var f = hand()
+        try f.apply(.raise(250)); try f.apply(.call)
+        let fk = DecisionPrompt.keys(for: ActionMenu.build(for: f))
+        XCTAssertEqual(fk, ["check", "bet_33pct", "bet_50pct", "bet_75pct", "bet_100pct", "bet_150pct", "allin"])
+        try f.apply(.bet(300))
+        let rk = DecisionPrompt.keys(for: ActionMenu.build(for: f))
+        XCTAssertEqual(Array(rk.prefix(2)), ["fold", "call"])
+        XCTAssertTrue(rk[2].hasPrefix("raise_to_") && rk[2].hasSuffix("bb"))
+        XCTAssertEqual(rk.last, "allin")
+    }
+
+    func testDecisionStateContents() throws {
+        var s = hand("AsKd", "QhQc")
+        try s.apply(.raise(250)); try s.apply(.raise(800))
+        let ctx = DecisionContext(state: s, seat: 0, menu: ActionMenu.build(for: s), handNumber: 7, rngSeed: 1, matchSummary: "Opp VPIP 40%")
+        let state = DecisionPrompt.state(for: ctx, includeSummary: true)
+        guard case .object(let o) = state else { return XCTFail() }
+        XCTAssertEqual(o["hero_hole_cards"], "As Kd")
+        XCTAssertEqual(o["hero_hole_cards_spelled"], "Ace of spades, King of diamonds")
+        XCTAssertEqual(o["to_call_bb"], 5.5)
+        XCTAssertEqual(o["pot_bb"], 10.5)
+        XCTAssertEqual(o["equity_needed_to_call"], 0.34)
+        XCTAssertEqual(o["opponent_stats"], "Opp VPIP 40%")
+        XCTAssertEqual(o["hero_hand_class"], "AKo (offsuit)")
+        let text = DecisionPrompt.compactJSON(state)
+        XCTAssertTrue(text.contains("Opponent (BB) raises to 8 bb"))
+        XCTAssertTrue(text.contains("3-bet to 8 bb"))
+        if case .object(let o2) = DecisionPrompt.state(for: ctx, includeSummary: false) { XCTAssertNil(o2["opponent_stats"]) }
+    }
+
+    func testDecisionPlayerArgmaxMapsKey() async throws {
+        let mock = MockDecider { keys, _ in
+            .choice(choice: "raise_to_3bb", confidence: 0.6, probabilities: ["fold": 0.1, "call": 0.2, "raise_to_3bb": 0.7])
+        }
+        let p = DecisionModelPlayer(model: "typesafe/jev-1.13", client: mock)
+        let d = try await p.decide(context(hand()))
+        XCTAssertEqual(d.action, .raise(300))
+        let m = try XCTUnwrap(d.meta)
+        XCTAssertEqual(m.menuChoice, 4)
+        XCTAssertEqual(m.promptTokens, 400)
+        XCTAssertEqual(m.cost, 0.0002, accuracy: 1e-12)
+        XCTAssertFalse(m.fallback)
+        let t = try XCTUnwrap(m.decision)
+        XCTAssertEqual(t.playedKey, "raise_to_3bb")
+        XCTAssertEqual(t.options.count, 6)
+        XCTAssertEqual(t.options[1].probability, 0.2)
+        XCTAssertNil(t.options[2].probability)
+        XCTAssertEqual(t.confidence, 0.6)
+        XCTAssertNotNil(t.state)
+    }
+
+    func testDecisionPlayerMixedSamplingIsSeeded() async throws {
+        let mock = MockDecider { _, _ in
+            .choice(choice: "call", confidence: 0.5, probabilities: ["fold": 0.3, "call": 0.4, "raise_to_3bb": 0.3])
+        }
+        let p = DecisionModelPlayer(model: "x/y", mode: .mixed, client: mock)
+        var counts: [ArenaAction: Int] = [:]
+        for seed in 0..<300 {
+            let ctx = DecisionContext(state: hand(), seat: 0, menu: ActionMenu.build(for: hand()), handNumber: 1, rngSeed: UInt64(seed))
+            let a = try await p.decide(ctx).action
+            let again = try await p.decide(ctx).action
+            XCTAssertEqual(a, again, "same seed, same action")
+            counts[a, default: 0] += 1
+        }
+        XCTAssertEqual(Set(counts.keys), [.fold, .call, .raise(300)])
+        XCTAssertEqual(Double(counts[.call]!) / 300, 0.4, accuracy: 0.1)
+        // argmax mode ignores the probabilities
+        let q = DecisionModelPlayer(model: "x/y", mode: .argmax, client: mock)
+        for seed in 0..<20 {
+            let ctx = DecisionContext(state: hand(), seat: 0, menu: ActionMenu.build(for: hand()), handNumber: 1, rngSeed: UInt64(seed))
+            let a = try await q.decide(ctx).action
+            XCTAssertEqual(a, .call)
+        }
+    }
+
+    func testDecisionPlayerInvalidKeyRetriesThenFallsBack() async throws {
+        let retry = MockDecider { _, n in .choice(choice: n == 0 ? "shove!!" : "CALL", confidence: nil, probabilities: [:]) }
+        let d = try await DecisionModelPlayer(model: "x/y", client: retry).decide(context(hand()))
+        XCTAssertEqual(d.action, .call, "case-insensitive match on the retry")
+        XCTAssertEqual(d.meta?.errors, 1)
+        XCTAssertEqual(retry.log.calls, 2)
+
+        let bad = MockDecider { _, _ in .choice(choice: "shove", confidence: nil, probabilities: ["shove": 1]) }
+        let f = try await DecisionModelPlayer(model: "x/y", client: bad).decide(context(hand()))
+        XCTAssertEqual(f.action, .fold)
+        XCTAssertEqual(f.meta?.fallback, true)
+        XCTAssertEqual(f.meta?.errors, 2)
+        XCTAssertEqual(f.meta?.decision?.choiceKey, "shove")
+
+        var failing = MockDecider { _, _ in nil }
+        failing.fail = true
+        var s = hand(); try s.apply(.call)
+        let e = try await DecisionModelPlayer(model: "x/y", client: failing).decide(context(s))
+        XCTAssertEqual(e.action, .check)
+        XCTAssertEqual(e.meta?.fallback, true)
+        XCTAssertEqual(e.meta?.raw.isEmpty, true, "hard failure (counts toward the abort streak)")
+    }
+
+    func testDecisionModelMatch() async throws {
+        // Prefers the most aggressive non-all-in option for A, passive for B; mixed sampling for B.
+        let aggro = MockDecider { keys, _ in
+            let k = keys.filter { $0.hasPrefix("raise") || $0.hasPrefix("bet") }.first ?? (keys.contains("call") ? "call" : "check")
+            return .choice(choice: k, confidence: 0.9, probabilities: [k: 0.9])
+        }
+        let calm = MockDecider { keys, _ in
+            let passive = keys.contains("check") ? "check" : "call"
+            return .choice(choice: passive, confidence: 0.5, probabilities: Dictionary(uniqueKeysWithValues: keys.map { ($0, $0 == passive ? 0.6 : 0.4 / Double(keys.count - 1)) }))
+        }
+        let specs: [PlayerSpec] = [.decision("test/aggro"), .decision("test/calm", mode: .mixed)]
+        let players: [any ArenaPlayer] = [
+            try PlayerFactory.make(specs[0], chat: nil, decisions: aggro),
+            try PlayerFactory.make(specs[1], chat: nil, decisions: calm),
+        ]
+        let cfg = MatchConfig(deals: 10, seed: 5, opponentStats: true)
+        let m1 = await MatchRunner.run(config: cfg, specs: specs, players: players, save: false)
+        let m2 = await MatchRunner.run(config: cfg, specs: specs, players: players, save: false)
+        XCTAssertEqual(m1.status, .completed)
+        XCTAssertEqual(m1.hands.count, 20)
+        XCTAssertEqual(m1.hands.map(\.actions.count), m2.hands.map(\.actions.count), "deterministic with the seed")
+        XCTAssertEqual(m1.hands.map { $0.net(0) }, m2.hands.map { $0.net(0) })
+        let s = try XCTUnwrap(m1.summary)
+        XCTAssertEqual(s.players[0].invalidActions, 0)
+        XCTAssertEqual(s.players[1].invalidActions, 0)
+        XCTAssertGreaterThan(s.players[0].promptTokens, 0)
+        XCTAssertTrue(m1.hands.flatMap(\.actions).allSatisfy { $0.meta?.decision != nil })
+        // Probabilities survive a save/load round trip and show up in the text history.
+        let data = try Storage.encoder.encode(m1)
+        let back = try Storage.decoder.decode(MatchRecord.self, from: data)
+        XCTAssertEqual(back.players, specs)
+        XCTAssertEqual(back.hands[0].actions[0].meta?.decision, m1.hands[0].actions[0].meta?.decision)
+        let text = HandHistoryFormatter.format(back.hands[0], match: back, includeReasoning: true)
+        XCTAssertTrue(text.contains("◀ played"))
+        XCTAssertTrue(text.contains("decision model (argmax)"))
+        print(text)
+        if let st = m1.hands.last?.actions.last?.meta?.decision?.state,
+           let v = try? JSONDecoder().decode(JSONValue.self, from: Data(st.utf8)) {
+            print("EXAMPLE STATE:\n" + v.prettyText)
+        }
+        let board = Leaderboard.compute([m1])
+        XCTAssertEqual(Set(board.map(\.id)), ["dm:test/aggro", "dm:test/calm~mix"])
+    }
+
+    func testDecisionPlayerSpecs() throws {
+        XCTAssertEqual(PlayerSpec.parse("dm:typesafe/jev-1.13"), .decision("typesafe/jev-1.13"))
+        XCTAssertEqual(PlayerSpec.parse("dm:typesafe/jev-1.13~mix"), .decision("typesafe/jev-1.13", mode: .mixed))
+        XCTAssertEqual(PlayerSpec.parse("typesafe/jev-1.13~mix"), .decision("typesafe/jev-1.13", mode: .mixed))
+        XCTAssertEqual(PlayerSpec.parse("dm:liquid/d1~argmax"), .decision("liquid/d1"))
+        XCTAssertNil(PlayerSpec.parse("dm:liquid/d1~bogus"))
+        XCTAssertNil(PlayerSpec.parse("dm:nomodel"))
+        XCTAssertEqual(PlayerSpec.parse("typesafe/jev-1.13"), .llm("typesafe/jev-1.13"), "plain ids stay chat until resolved")
+        XCTAssertEqual(PlayerSpec.parse("typesafe/jev-1.13")?.resolvingDecisionModels(["typesafe/jev-1.13"]), .decision("typesafe/jev-1.13"))
+        XCTAssertEqual(PlayerSpec.parse("openai/gpt-5")?.resolvingDecisionModels(["typesafe/jev-1.13"]), .llm("openai/gpt-5"))
+
+        let a = PlayerSpec.decision("typesafe/jev-1.13"), b = PlayerSpec.decision("typesafe/jev-1.13", mode: .mixed)
+        XCTAssertEqual(a.id, "dm:typesafe/jev-1.13")
+        XCTAssertEqual(b.id, "dm:typesafe/jev-1.13~mix")
+        XCTAssertNotEqual(a.id, b.id)
+        XCTAssertEqual(a.displayName, "jev-1.13")
+        XCTAssertEqual(b.displayName, "jev-1.13 · mixed")
+        XCTAssertEqual(b.provider, "typesafe")
+        for spec in [a, b, .llm("openai/gpt-5", effort: "low"), .bot(.tag)] {
+            XCTAssertEqual(PlayerSpec.parse(spec.id), spec, "id round-trips through parse")
+            XCTAssertEqual(try JSONDecoder().decode(PlayerSpec.self, from: JSONEncoder().encode(spec)), spec)
+        }
+        // Saved before decision models existed.
+        let old = #"{"kind":"llm","model":"openai/gpt-5","reasoningEffort":"low"}"#
+        XCTAssertEqual(try JSONDecoder().decode(PlayerSpec.self, from: Data(old.utf8)), .llm("openai/gpt-5", effort: "low"))
+        let oldBot = #"{"kind":"bot","model":"tag"}"#
+        XCTAssertEqual(try JSONDecoder().decode(PlayerSpec.self, from: Data(oldBot.utf8)), .bot(.tag))
+        let oldMeta = #"{"raw":[],"latency":0,"promptTokens":1,"completionTokens":2,"reasoningTokens":0,"cost":0,"errors":0,"fallback":false}"#
+        XCTAssertNil(try JSONDecoder().decode(DecisionMeta.self, from: Data(oldMeta.utf8)).decision)
+        XCTAssertThrowsError(try PlayerFactory.make(a, chat: nil))
+    }
 }

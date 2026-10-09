@@ -146,7 +146,7 @@ struct SuiteOverview: View {
             ForEach(model.runs) { run in
                 let s = model.leaderboard.first { $0.id == run.id }
                 HStack(spacing: 10) {
-                    Image(systemName: run.kind == .baseline ? "cpu" : "sparkles")
+                    Image(systemName: run.kind.icon)
                         .foregroundStyle(.secondary).frame(width: 16)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(run.label).font(.callout.weight(.medium))

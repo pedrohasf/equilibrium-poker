@@ -273,8 +273,40 @@ public struct BenchmarkSuite: Codable, Hashable, Sendable, Identifiable {
 
 // MARK: - Runs
 
-public enum PlayerKind: String, Codable, Sendable {
-    case llm, baseline
+public enum PlayerKind: String, Codable, Sendable, CaseIterable {
+    /// Chat LLM answering a text prompt (raw value kept for saved runs).
+    case llm
+    case baseline
+    /// OpenRouter System One decision model (typed `choice` question with probabilities).
+    case decisionModel
+
+    /// Any API-backed player (chat LLM or decision model).
+    public var isModel: Bool { self != .baseline }
+
+    public var title: String {
+        switch self {
+        case .llm: return "Chat LLM"
+        case .baseline: return "Baseline"
+        case .decisionModel: return "Decision model"
+        }
+    }
+
+    public var groupTitle: String {
+        switch self {
+        case .llm: return "Chat LLMs"
+        case .baseline: return "Baselines"
+        case .decisionModel: return "Decision models"
+        }
+    }
+
+    /// Display / grouping order: decision models first (the benchmark's focus), then chat LLMs, then bots.
+    public var order: Int {
+        switch self {
+        case .decisionModel: return 0
+        case .llm: return 1
+        case .baseline: return 2
+        }
+    }
 }
 
 /// One player's answer to one decision.
@@ -291,13 +323,18 @@ public struct DecisionResult: Codable, Hashable, Sendable, Identifiable {
     public var reasoningTokens: Int
     public var cost: Double
     public var answeredAt: Date
+    /// Probability the player assigns to each legal action (same order as `Decision.actions`, sums to 1).
+    /// Set by decision models (and the sampled-GTO baseline); nil for argmax-only players and old runs.
+    public var actionProbabilities: [Double]?
+    /// Decision model's reported confidence in its choice (0–1).
+    public var confidence: Double?
 
     public var id: String { decisionId }
     public var isValid: Bool { choice != nil }
 
     public init(decisionId: String, choice: Int?, rawResponse: String? = nil, reasoning: String? = nil, error: String? = nil,
                 latency: Double = 0, promptTokens: Int = 0, completionTokens: Int = 0, reasoningTokens: Int = 0,
-                cost: Double = 0, answeredAt: Date = Date()) {
+                cost: Double = 0, answeredAt: Date = Date(), actionProbabilities: [Double]? = nil, confidence: Double? = nil) {
         self.decisionId = decisionId
         self.choice = choice
         self.rawResponse = rawResponse
@@ -309,6 +346,8 @@ public struct DecisionResult: Codable, Hashable, Sendable, Identifiable {
         self.reasoningTokens = reasoningTokens
         self.cost = cost
         self.answeredAt = answeredAt
+        self.actionProbabilities = actionProbabilities
+        self.confidence = confidence
     }
 }
 
@@ -322,6 +361,8 @@ public struct BenchmarkRun: Codable, Hashable, Sendable, Identifiable {
     public var kind: PlayerKind
     public var options: ChatOptions?
     public var promptVersion: Int
+    /// `DecisionStateBuilder.version` for decision-model runs (nil for chat LLMs, baselines and old runs).
+    public var stateVersion: Int?
     public var createdAt: Date
     public var updatedAt: Date
     public var results: [DecisionResult]
@@ -335,6 +376,7 @@ public struct BenchmarkRun: Codable, Hashable, Sendable, Identifiable {
         self.kind = kind
         self.options = options
         self.promptVersion = promptVersion
+        self.stateVersion = kind == .decisionModel ? DecisionStateBuilder.version : nil
         self.createdAt = Date()
         self.updatedAt = Date()
         self.results = []

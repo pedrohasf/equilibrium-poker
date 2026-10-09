@@ -126,7 +126,39 @@ struct ActionChip: View {
     }
 }
 
+extension PlayerKind {
+    var icon: String {
+        switch self {
+        case .decisionModel: return "scope"
+        case .llm: return "sparkles"
+        case .baseline: return "cpu"
+        }
+    }
+
+    /// Series colour for charts that compare player groups.
+    var tint: Color {
+        switch self {
+        case .decisionModel: return Viz.series1
+        case .llm: return Viz.series3
+        case .baseline: return Viz.reference
+        }
+    }
+}
+
+/// "Decision" capsule marking System One decision models.
+struct DecisionBadge: View {
+    var body: some View {
+        Tag("Decision", tint: Viz.series1)
+            .help("OpenRouter System One decision model: answers a typed choice question with probabilities; output is free")
+    }
+}
+
 extension ModelScore {
+    // Sort keys for distribution metrics; players without probabilities sort last.
+    var mixedLossSort: Double { overall.meanMixedEVLossPot ?? .infinity }
+    var tvSort: Double { overall.meanTVDistance ?? .infinity }
+    var bestProbSort: Double { overall.meanBestActionProbability ?? -1 }
+
     var score: Double { overall.gtoScore }
     var lossPot: Double { overall.meanEVLossPot }
     var lossBB: Double { overall.meanEVLoss }

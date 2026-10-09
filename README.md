@@ -9,10 +9,14 @@ A native macOS GTO poker lab:
   vectorised ranges, written in Rust, with a SwiftUI workbench (range editor,
   board picker, live convergence chart, GTO-Wizard-style strategy matrix,
   per-combo EV/equity inspector).
-- **LLM Benchmarks** — measures how much EV language models (via
-  [OpenRouter](https://openrouter.ai)) lose versus the solved equilibrium,
-  decision by decision.
-- **Arena** — full heads-up matches between LLMs and bots, in duplicate format,
+- **Model Benchmarks** — measures how much EV OpenRouter
+  [decision models](https://openrouter.ai/models?output_modalities=decisions)
+  (TypeSafe Jev, Liquid d1, Cloudflare Clef, GPT-6 Luna Decisions, …) and chat
+  LLMs lose versus the solved equilibrium, decision by decision. Decision models
+  return a probability for every action, so they are also scored as mixed
+  strategies (mixed EV loss, distance to the GTO mix, P(best action)).
+- **Arena** — full heads-up matches between decision models, LLMs and bots
+  (decision models play argmax or sample their returned distribution), in duplicate format,
   with bb/100, all-in-EV, player stats and hand-history replays.
 
 ## Build & run
@@ -60,6 +64,24 @@ examples/             sample solver configs (`core/target/release/solve examples
   betting range, call 50%) and by comparing isomorphic vs. full trees.
 - Typical speeds on an M4 Pro: river spots instant, turn spots ≈0.3 s, a
   single-size flop tree (≈2.8 GB) to 0.3% pot in about a minute.
+
+## Quick start: benchmark decision models
+
+```sh
+export OPENROUTER_API_KEY=sk-or-...
+eqbench bench decision-models                         # live catalog + prices
+eqbench bench generate --decisions 60 --seed 1        # solve spots → suite
+eqbench bench run --suite <id> --models typesafe/jev-1.13,liquid/d1,cloudflare/clef
+eqbench bench report
+eqbench bench state --suite <id> --decision d001      # exact request sent
+eqbench arena match --a dm:typesafe/jev-1.13 --b bot:tag --deals 100
+```
+
+Decision models are called through `POST /api/alpha/decisions` (fallback
+`/api/v1/systemone`) with a structured JSON `state` and one `choice` question
+whose options are the legal actions. They receive derived facts (made hand,
+draws, pot odds, SPR) as the API guidance recommends — chat LLMs don't, so
+compare the two groups with that in mind.
 
 ## Benchmark methodology (short)
 

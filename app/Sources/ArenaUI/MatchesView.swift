@@ -281,7 +281,10 @@ struct HandReplayView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(cur.caption).font(.callout.weight(.semibold))
                 if let m = cur.action?.meta {
-                    if let r = m.reasoning, !r.isEmpty {
+                    if let t = m.decision {
+                        DecisionProbabilityView(trace: t, fallback: m.fallback)
+                            .frame(maxWidth: 420, alignment: .leading)
+                    } else if let r = m.reasoning, !r.isEmpty {
                         Text(r).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     if m.fallback {
@@ -289,9 +292,12 @@ struct HandReplayView: View {
                             .font(.caption).foregroundStyle(Theme.negative)
                     }
                     if m.latency > 0 || m.cost > 0 {
-                        Text("\(Fmt.duration(m.latency)) · \(m.promptTokens)/\(m.completionTokens) tokens · \(Fmt.usd(m.cost))")
+                        Text(m.decision != nil
+                             ? "\(Fmt.duration(m.latency)) · \(m.promptTokens) input tokens · \(Fmt.usd(m.cost))"
+                             : "\(Fmt.duration(m.latency)) · \(m.promptTokens)/\(m.completionTokens) tokens · \(Fmt.usd(m.cost))")
                             .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                     }
+                    if let st = m.decision?.state, !st.isEmpty { DecisionStateDisclosure(state: st) }
                     if !m.raw.isEmpty {
                         DisclosureGroup("Raw response\(m.raw.count > 1 ? "s (\(m.raw.count))" : "")") {
                             Text(m.raw.joined(separator: "\n\n— retry —\n\n")).font(.caption.monospaced()).textSelection(.enabled)

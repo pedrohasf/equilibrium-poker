@@ -191,7 +191,7 @@ struct PlayerPlate: View {
                 Text(spec.displayName).font(.headline).foregroundStyle(.white).lineLimit(1)
                 if edge == .top { dealerButton }
             }
-            Text("\(spec.provider) · \(seat == 0 ? "BTN/SB" : "BB")")
+            Text("\(spec.provider)\(spec.kind == .decision ? " · decision" : "") · \(seat == 0 ? "BTN/SB" : "BB")")
                 .font(.caption).foregroundStyle(.white.opacity(0.6))
             HStack(spacing: 6) {
                 Text("\(Chips.text(state?.stacks[seat] ?? 0)) bb")

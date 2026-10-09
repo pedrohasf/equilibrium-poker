@@ -27,11 +27,11 @@ struct DecisionExplorer: View {
         for run in model.runs {
             for r in run.results {
                 guard let d = byId[r.decisionId] else { continue }
-                out[d.id, default: []].append(Answer(run: run, result: r, score: Scoring.score(d, choice: r.choice)))
+                out[d.id, default: []].append(Answer(run: run, result: r, score: Scoring.score(d, result: r, run: run)))
             }
         }
         for k in out.keys {
-            out[k]!.sort { ($0.run.kind == .llm ? 0 : 1, $0.score.evLoss) < ($1.run.kind == .llm ? 0 : 1, $1.score.evLoss) }
+            out[k]!.sort { ($0.run.kind.order, $0.score.evLoss) < ($1.run.kind.order, $1.score.evLoss) }
         }
         return out
     }
@@ -41,7 +41,7 @@ struct DecisionExplorer: View {
         return suite.decisions.filter { d in
             if let street, d.street != street { return false }
             if let type, d.decisionType != type { return false }
-            let llm = (answers[d.id] ?? []).filter { $0.run.kind == .llm }
+            let llm = (answers[d.id] ?? []).filter { $0.run.kind.isModel }
             if blundersOnly && !llm.contains(where: { $0.score.blunder }) { return false }
             if disagreementOnly && Set(llm.map { $0.score.choice ?? -1 }).count < 2 { return false }
             if !q.isEmpty {
@@ -123,7 +123,7 @@ struct DecisionRow: View {
     let answers: [Answer]
 
     var body: some View {
-        let llm = answers.filter { $0.run.kind == .llm }
+        let llm = answers.filter { $0.run.kind.isModel }
         let worst = llm.max { $0.score.evLoss < $1.score.evLoss }
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
@@ -166,6 +166,7 @@ struct DecisionDetail: View {
     let answers: [Answer]
     @State private var revealVillain = false
     @State private var showPrompt = false
+    @State private var showState = false
 
     private var d: Decision { decision }
 
@@ -195,6 +196,19 @@ struct DecisionDetail: View {
                 }
                 solverPanel
                 answersPanel
+                DisclosureGroup(isExpanded: $showState) {
+                    if showState {
+                        Text(DecisionStateBuilder.requestBody(d).prettyText)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                } label: {
+                    Label("State sent to decision models (v\(DecisionStateBuilder.version), ~\(DecisionStateBuilder.estimatedInputTokens(d)) input tokens)",
+                          systemImage: "curlybraces")
+                }
                 DisclosureGroup(isExpanded: $showPrompt) {
                     Text(PromptBuilder.system + "\n\n" + PromptBuilder.user(d))
                         .font(.caption.monospaced())
@@ -203,7 +217,7 @@ struct DecisionDetail: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
                 } label: {
-                    Label("Prompt sent to models (v\(PromptBuilder.version))", systemImage: "text.bubble")
+                    Label("Prompt sent to chat LLMs (v\(PromptBuilder.version))", systemImage: "text.bubble")
                 }
             }
             .padding(18)
@@ -293,9 +307,10 @@ struct AnswerRow: View {
         let r = answer.result
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
-                Image(systemName: answer.run.kind == .baseline ? "cpu" : "sparkles").foregroundStyle(.secondary).frame(width: 14)
+                Image(systemName: answer.run.kind.icon).foregroundStyle(.secondary).frame(width: 14)
                 Text(answer.run.label).font(.callout.weight(.medium)).lineLimit(1)
                     .foregroundStyle(answer.run.kind == .baseline ? .secondary : .primary)
+                if answer.run.kind == .decisionModel { DecisionBadge() }
                 Spacer()
                 ActionChip(actions: decision.actions, index: s.choice)
                     .frame(minWidth: 130, alignment: .leading)
@@ -305,7 +320,30 @@ struct AnswerRow: View {
                     .frame(width: 46, alignment: .trailing)
                 GradeBadge(grade: AnswerGrade(s)).frame(width: 78, alignment: .leading)
             }
-            if answer.run.kind == .llm {
+            if answer.run.kind == .decisionModel, let p = r.actionProbabilities, p.count == decision.actions.count {
+                DistributionComparison(decision: decision, probabilities: p, score: s, confidence: r.confidence)
+                    .padding(.leading, 24)
+            }
+            if answer.run.kind == .decisionModel {
+                DisclosureGroup(isExpanded: $expanded) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let e = r.error { Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(Viz.serious) }
+                        Text("Response").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text(r.rawResponse ?? "(empty)").font(.caption.monospaced()).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.background.tertiary, in: RoundedRectangle(cornerRadius: 8))
+                } label: {
+                    HStack(spacing: 12) {
+                        Text("Raw response")
+                        Text("\(Fmt.duration(r.latency)) · \(BenchFmt.tokens(r.promptTokens)) input tok · \(Fmt.usd(r.cost))")
+                            .monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                }
+            } else if answer.run.kind == .llm {
                 DisclosureGroup(isExpanded: $expanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let e = r.error { Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(Viz.serious) }
@@ -330,6 +368,44 @@ struct AnswerRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// A decision model's probabilities over the actions next to the GTO strategy for the hand.
+struct DistributionComparison: View {
+    let decision: Decision
+    let probabilities: [Double]
+    let score: DecisionScore
+    let confidence: Double?
+
+    var body: some View {
+        let infos = decision.actions.map(\.actionInfo)
+        VStack(alignment: .leading, spacing: 4) {
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 4) {
+                GridRow {
+                    Text("Model").font(.caption2).foregroundStyle(.secondary)
+                    FrequencyBar(actions: infos, frequencies: probabilities.map(Float.init), height: 10)
+                        .help(zip(decision.actions, probabilities).map { "\($0.shortLabel) \(Fmt.pct($1, decimals: 0))" }.joined(separator: " · "))
+                }
+                GridRow {
+                    Text("GTO").font(.caption2).foregroundStyle(.secondary)
+                    FrequencyBar(actions: infos, frequencies: decision.strategy.map(Float.init), height: 10)
+                        .help(zip(decision.actions, decision.strategy).map { "\($0.shortLabel) \(Fmt.pct($1, decimals: 0))" }.joined(separator: " · "))
+                }
+            }
+            HStack(spacing: 12) {
+                ForEach(decision.actions.indices, id: \.self) { i in
+                    Text("\(decision.actions[i].shortLabel) \(Fmt.pct(probabilities[i], decimals: 0))")
+                }
+                Spacer()
+                if let c = confidence { Text("confidence \(String(format: "%.2f", c))") }
+                if let m = score.mixedEVLossPot { Text("mixed −\(BenchFmt.pctPot(m))") }
+                if let tv = score.tvDistance { Text("TV \(String(format: "%.2f", tv))") }
+                if let b = score.bestActionProbability { Text("P(best) \(Fmt.pct(b, decimals: 0))") }
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
     }
 }
 

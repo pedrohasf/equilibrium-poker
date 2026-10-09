@@ -132,10 +132,13 @@ public struct DecisionMeta: Codable, Hashable, Sendable {
     /// True when the action was replaced by the check/fold default.
     public var fallback: Bool
     public var errorMessage: String?
+    /// Decision-model players: the probability vector over the action menu and the state sent.
+    public var decision: DecisionTrace?
 
     public init(reasoning: String? = nil, thinking: String? = nil, raw: [String] = [], menuChoice: Int? = nil, latency: Double = 0,
                 promptTokens: Int = 0, completionTokens: Int = 0, reasoningTokens: Int = 0, cost: Double = 0,
-                errors: Int = 0, fallback: Bool = false, errorMessage: String? = nil) {
+                errors: Int = 0, fallback: Bool = false, errorMessage: String? = nil, decision: DecisionTrace? = nil) {
+        self.decision = decision
         self.reasoning = reasoning
         self.thinking = thinking
         self.raw = raw

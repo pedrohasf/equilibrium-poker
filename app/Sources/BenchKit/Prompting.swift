@@ -193,6 +193,12 @@ public enum CostEstimator {
         public var usd: Double?
     }
 
+    /// Decision models bill input tokens only (output is free).
+    public static func decisionEstimate(decisions: [Decision], promptPrice: Double?) -> Estimate {
+        let p = decisions.reduce(0) { $0 + DecisionStateBuilder.estimatedInputTokens($1) }
+        return Estimate(promptTokens: p, completionTokens: 0, usd: promptPrice.map { Double(p) * $0 })
+    }
+
     public static func estimate(decisions: [Decision], promptPrice: Double?, completionPrice: Double?,
                                 reasoningEffort: String?) -> Estimate {
         let p = decisions.reduce(0) { $0 + promptTokens($1) }

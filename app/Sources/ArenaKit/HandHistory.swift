@@ -37,6 +37,24 @@ public enum HandHistoryFormatter {
         }
     }
 
+    /// Probability per menu option for a decision-model action ("    »   31%  call   Call 1.5 bb ◀ played").
+    static func decisionLines(_ t: DecisionTrace) -> [String] {
+        let w = t.options.map(\.key.count).max() ?? 4
+        var out = t.options.map { o -> String in
+            let p = o.probability.map { String(format: "%3.0f%%", $0 * 100) } ?? "   –"
+            let bar = String(repeating: "█", count: Int(((o.probability ?? 0) * 20).rounded()))
+            var line = "    » \(p) \(o.key.padding(toLength: w, withPad: " ", startingAt: 0))  \(bar)".replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+            if o.key == t.playedKey { line += "  ◀ played" + (t.mode == .mixed && o.key != t.choiceKey ? " (sampled)" : "") }
+            else if o.key == t.choiceKey { line += "  (model's top choice)" }
+            return line
+        }
+        var head = "    » decision model (\(t.mode.rawValue))"
+        if let c = t.confidence { head += String(format: ", confidence %.0f%%", c * 100) }
+        if let c = t.choiceKey, t.choiceIndex == nil { head += ", returned unknown key '\(c)'" }
+        out.insert(head, at: 0)
+        return out
+    }
+
     public static func format(_ h: HandRecord, match: MatchRecord, includeReasoning: Bool = false) -> String {
         let names = match.players.map(\.id)
         let seatName = { (s: Int) in names[h.seatPlayers[s]] }
@@ -69,7 +87,9 @@ public enum HandHistoryFormatter {
                 header(street)
             }
             lines.append("\(seatName(a.seat)): \(verb(a))")
-            if includeReasoning, let r = a.meta?.reasoning, !r.isEmpty {
+            if includeReasoning, let t = a.meta?.decision {
+                lines.append(contentsOf: decisionLines(t))
+            } else if includeReasoning, let r = a.meta?.reasoning, !r.isEmpty {
                 lines.append("    » " + r.replacingOccurrences(of: "\n", with: " "))
             }
             if let m = a.meta, m.fallback {

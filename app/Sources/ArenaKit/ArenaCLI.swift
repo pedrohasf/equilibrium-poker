@@ -14,15 +14,19 @@ public enum ArenaCLI {
                                                Summary, or a PokerStars-style hand history
       eqbench arena leaderboard                Ratings across all saved matches
       eqbench arena bots                       Built-in bots
+      eqbench arena decision-models            Live catalog of System One decision models
 
     PLAYERS:
       bot:tag, bot:station, bot:maniac, bot:random, or an OpenRouter model id such as
       openai/gpt-5 (append @low / @high to set the reasoning effort for that player).
+      Decision models: dm:typesafe/jev-1.13 plays the model's top choice (argmax);
+      dm:typesafe/jev-1.13~mix samples from its probabilities (seeded). Plain ids that are
+      decision models in the live catalog are detected automatically.
 
     OPTIONS:
       --deals N        distinct deals; each is played twice with seats swapped (2N hands)
       --single         play each deal once (no duplicate), alternating the button
-      --stats          include a running opponent-stats summary in LLM prompts
+      --stats          include a running opponent-stats summary in LLM prompts / decision states
       --effort E       default reasoning effort for LLM players
       --verbose        print every hand history as it finishes
     """
@@ -35,6 +39,7 @@ public enum ArenaCLI {
         case "show": try show(rest)
         case "leaderboard": leaderboard()
         case "bots": bots()
+        case "decision-models", "dm": try await decisionModels()
         default: print(usage)
         }
     }
@@ -73,8 +78,6 @@ public enum ArenaCLI {
         let effort = option("--effort", &args)
         guard var a = PlayerSpec.parse(aText) else { throw EngineError("unknown player '\(aText)'") }
         guard var b = PlayerSpec.parse(bText) else { throw EngineError("unknown player '\(bText)'") }
-        if a.kind == .llm && a.reasoningEffort == nil { a.reasoningEffort = effort }
-        if b.kind == .llm && b.reasoningEffort == nil { b.reasoningEffort = effort }
         var config = MatchConfig()
         config.deals = Int(option("--deals", &args) ?? "") ?? 50
         config.seed = UInt64(option("--seed", &args) ?? "") ?? 1
@@ -84,10 +87,19 @@ public enum ArenaCLI {
         let verbose = flag("--verbose", &args)
         let save = !flag("--no-save", &args)
 
-        let needsLLM = a.kind == .llm || b.kind == .llm
-        let client: OpenRouterClient? = needsLLM ? try OpenRouterClient.fromStoredKey(maxConcurrent: max(4, config.concurrency * 2)) : nil
+        let needsKey = a.usesOpenRouter || b.usesOpenRouter
+        let client: OpenRouterClient? = needsKey ? try OpenRouterClient.fromStoredKey(maxConcurrent: max(4, config.concurrency * 2)) : nil
+        // Plain ids that are System One decision models become decision players.
+        if let client, [a, b].contains(where: { $0.kind == .llm && $0.reasoningEffort == nil }),
+           let dms = try? await client.decisionModels() {
+            let ids = Set(dms.map(\.id))
+            a = a.resolvingDecisionModels(ids)
+            b = b.resolvingDecisionModels(ids)
+        }
+        if a.kind == .llm && a.reasoningEffort == nil { a.reasoningEffort = effort }
+        if b.kind == .llm && b.reasoningEffort == nil { b.reasoningEffort = effort }
         let options = LLMPlayer.Options(includeMatchSummary: config.opponentStats)
-        let players = try [a, b].map { try PlayerFactory.make($0, chat: client, options: options) }
+        let players = try [a, b].map { try PlayerFactory.make($0, chat: client, decisions: client, options: options) }
 
         let id = MatchRecord.newID()
         print("Match \(id): A = \(a.id)  vs  B = \(b.id)")
@@ -206,6 +218,21 @@ public enum ArenaCLI {
                   + pad("\(e.hands)", 8, right: true) + pad("\(e.matches)", 9, right: true))
         }
         print("\nRating: Bradley–Terry (Elo scale, mean 1500); each match scores the share of big blinds won across duplicate pairs.\nW-L-T counts duplicate pairs. Self-play matches are excluded.")
+    }
+
+    static func decisionModels() async throws {
+        let client = try OpenRouterClient.fromStoredKey()
+        let models = try await client.decisionModels().sorted { $0.id < $1.id }
+        if models.isEmpty { print("No decision models in the catalog."); return }
+        let suggested = Set(DecisionRoster.suggested)
+        print(pad("Model", 46) + pad("Input $/M", 11, right: true) + "  Player spec")
+        for m in models {
+            let price = m.promptPricePerM.map { String(format: "$%.3f", $0) } ?? "?"
+            print(pad(m.id + (suggested.contains(m.id) ? " *" : ""), 46) + pad(price, 11, right: true) + "  dm:\(m.id)[~mix]")
+        }
+        let missing = DecisionRoster.suggested.filter { id in !models.contains { $0.id == id } }
+        print("\n* suggested roster. Decision models bill input tokens only; output is free.")
+        if !missing.isEmpty { print("Suggested but not in the live catalog: " + missing.joined(separator: ", ")) }
     }
 
     static func bots() {

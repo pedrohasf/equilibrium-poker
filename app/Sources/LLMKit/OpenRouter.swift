@@ -117,6 +117,16 @@ public struct ChatResult: Codable, Hashable, Sendable {
     /// Wall-clock seconds for the request (including retries).
     public var latency: Double
     public var finishReason: String?
+
+    public init(model: String, content: String, reasoning: String? = nil, usage: ChatUsage = .init(), latency: Double = 0,
+                finishReason: String? = nil) {
+        self.model = model
+        self.content = content
+        self.reasoning = reasoning
+        self.usage = usage
+        self.latency = latency
+        self.finishReason = finishReason
+    }
 }
 
 public struct ModelInfo: Codable, Hashable, Sendable, Identifiable {
@@ -127,6 +137,11 @@ public struct ModelInfo: Codable, Hashable, Sendable, Identifiable {
     public var promptPrice: Double?
     public var completionPrice: Double?
     public var created: Double?
+    /// e.g. ["text"] or ["decisions"].
+    public var outputModalities: [String]? = nil
+
+    /// System One decision model (answers typed questions instead of generating text).
+    public var isDecisionModel: Bool { outputModalities?.contains("decisions") ?? false }
 
     public var provider: String { String(id.split(separator: "/").first ?? "") }
 
@@ -149,8 +164,8 @@ public actor OpenRouterClient {
     public static let baseURL = URL(string: "https://openrouter.ai/api/v1")!
 
     private let apiKey: String
-    private let session: URLSession
-    private let maxRetries: Int
+    let session: URLSession
+    let maxRetries: Int
     private var inFlight = 0
     private let maxConcurrent: Int
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -174,7 +189,7 @@ public actor OpenRouterClient {
         return OpenRouterClient(apiKey: key, maxConcurrent: maxConcurrent)
     }
 
-    private func acquire() async {
+    func acquire() async {
         if inFlight < maxConcurrent {
             inFlight += 1
             return
@@ -182,7 +197,7 @@ public actor OpenRouterClient {
         await withCheckedContinuation { waiters.append($0) }
     }
 
-    private func release() {
+    func release() {
         if !waiters.isEmpty {
             waiters.removeFirst().resume()
         } else {
@@ -191,7 +206,11 @@ public actor OpenRouterClient {
     }
 
     private func request(_ path: String, body: Data? = nil) -> URLRequest {
-        var r = URLRequest(url: Self.baseURL.appendingPathComponent(path))
+        request(url: Self.baseURL.appendingPathComponent(path), body: body)
+    }
+
+    func request(url: URL, body: Data? = nil) -> URLRequest {
+        var r = URLRequest(url: url)
         r.httpMethod = body == nil ? "GET" : "POST"
         r.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -201,8 +220,24 @@ public actor OpenRouterClient {
         return r
     }
 
+    /// Text models plus System One decision models, de-duplicated.
     public func models() async throws -> [ModelInfo] {
-        let (data, resp) = try await session.data(for: request("models"))
+        async let text = models(outputModality: nil)
+        async let decisions = models(outputModality: "decisions")
+        var seen = Set<String>()
+        let decisionList = (try? await decisions) ?? []
+        return (try await text + decisionList).filter { seen.insert($0.id).inserted }
+    }
+
+    /// Only the System One decision models (`output_modalities=decisions`).
+    public func decisionModels() async throws -> [ModelInfo] {
+        try await models(outputModality: "decisions")
+    }
+
+    private func models(outputModality: String?) async throws -> [ModelInfo] {
+        var comps = URLComponents(url: Self.baseURL.appendingPathComponent("models"), resolvingAgainstBaseURL: false)!
+        if let m = outputModality { comps.queryItems = [URLQueryItem(name: "output_modalities", value: m)] }
+        let (data, resp) = try await session.data(for: request(url: comps.url!))
         try Self.check(resp, data)
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let list = obj["data"] as? [[String: Any]] else {
@@ -215,9 +250,11 @@ public actor OpenRouterClient {
                 if let s = pricing?[k] as? String { return Double(s) }
                 return (pricing?[k] as? NSNumber)?.doubleValue
             }
+            let arch = m["architecture"] as? [String: Any]
             return ModelInfo(id: id, name: m["name"] as? String ?? id, contextLength: (m["context_length"] as? NSNumber)?.intValue,
                              promptPrice: price("prompt"), completionPrice: price("completion"),
-                             created: (m["created"] as? NSNumber)?.doubleValue)
+                             created: (m["created"] as? NSNumber)?.doubleValue,
+                             outputModalities: arch?["output_modalities"] as? [String])
         }
     }
 
@@ -256,7 +293,7 @@ public actor OpenRouterClient {
         }
     }
 
-    private static func check(_ resp: URLResponse, _ data: Data) throws {
+    static func check(_ resp: URLResponse, _ data: Data) throws {
         guard let http = resp as? HTTPURLResponse else { return }
         if (200..<300).contains(http.statusCode) {
             // OpenRouter can return 200 with an error body for upstream failures.

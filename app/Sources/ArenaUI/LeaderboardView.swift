@@ -23,7 +23,10 @@ struct LeaderboardView: View {
                             }.width(26)
                             TableColumn("Player", value: \.id) { e in
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(e.spec.displayName).font(.body.weight(.medium))
+                                    HStack(spacing: 6) {
+                                        Text(e.spec.displayName).font(.body.weight(.medium))
+                                        if e.spec.kind == .decision { DecisionBadge(mode: e.spec.mode) }
+                                    }
                                     Text(e.spec.kind == .bot ? "built-in bot" : e.spec.model).font(.caption).foregroundStyle(.secondary)
                                 }
                             }.width(min: 160, ideal: 220)

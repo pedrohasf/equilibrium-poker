@@ -54,13 +54,28 @@ struct RunPanel: View {
     }
 
     private var rosterPanel: some View {
-        Panel("Models", systemImage: "sparkles") {
+        let ids = model.roster(for: model.modelGroup)
+        return Panel("Models", systemImage: "sparkles") {
             VStack(alignment: .leading, spacing: 0) {
+                Picker("", selection: $model.modelGroup) {
+                    ForEach(ModelGroup.allCases) { g in
+                        let n = model.roster(for: g).filter(model.selectedModels.contains).count
+                        Text(n > 0 ? "\(g.title) · \(n)" : g.title).tag(g)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.bottom, 8)
+                Text(model.modelGroup == .decision
+                     ? "System One decision models read a JSON state of the spot and answer one typed choice question with a probability for every legal action. Output is free; you pay for input tokens only."
+                     : "Chat LLMs read a text prompt, reason, and reply with an action number. Shown as a comparison group.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 8)
                 HStack {
-                    Text("\(model.selectedModels.count) selected").font(.caption).foregroundStyle(.secondary)
+                    Text("\(model.selectedModels.count) selected in total").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("All") { model.selectedModels = Set(model.roster) }.buttonStyle(.borderless)
-                    Button("None") { model.selectedModels = [] }.buttonStyle(.borderless)
+                    Button("All") { model.selectedModels.formUnion(ids) }.buttonStyle(.borderless)
+                    Button("None") { model.selectedModels.subtract(ids) }.buttonStyle(.borderless)
                     Button {
                         showCatalog = true
                     } label: {
@@ -70,9 +85,18 @@ struct RunPanel: View {
                 }
                 .font(.caption)
                 .padding(.bottom, 6)
-                ForEach(model.roster, id: \.self) { id in
+                if ids.isEmpty {
+                    Text(model.modelGroup == .decision ? "No decision models on the roster are in the live catalog. Add some from the catalog."
+                         : "No chat models on the roster.")
+                        .font(.callout).foregroundStyle(.secondary).padding(.vertical, 6)
+                }
+                ForEach(ids, id: \.self) { id in
                     rosterRow(id)
                     Divider()
+                }
+                if model.modelGroup == .decision, model.catalogState == .loaded, !model.missingDecisionModels.isEmpty {
+                    Text("Hidden (not in the live catalog): \(model.missingDecisionModels.joined(separator: ", "))")
+                        .font(.caption2).foregroundStyle(.secondary).padding(.top, 6)
                 }
                 if case .failed(let e) = model.catalogState {
                     Label("Catalog unavailable: \(e)", systemImage: "exclamationmark.triangle")
@@ -84,7 +108,8 @@ struct RunPanel: View {
 
     private func rosterRow(_ id: String) -> some View {
         let info = model.modelInfo(id)
-        let runId = BenchmarkRun.makeId(suiteId: suite.id, model: id, options: model.chatOptions)
+        let isDecision = model.isDecisionModel(id)
+        let runId = model.runId(for: id, suite: suite)
         let done = model.runs.first { $0.id == runId }?.results.count ?? 0
         let est = model.selectedModels.contains(id) ? model.estimate(for: id) : nil
         return HStack(spacing: 10) {
@@ -93,7 +118,10 @@ struct RunPanel: View {
                 .toggleStyle(.checkbox)
                 .labelsHidden()
             VStack(alignment: .leading, spacing: 1) {
-                Text(info?.name ?? id).font(.callout.weight(.medium)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(info?.name ?? id).font(.callout.weight(.medium)).lineLimit(1)
+                    if isDecision { DecisionBadge() }
+                }
                 HStack(spacing: 6) {
                     Text(id).font(.caption.monospaced())
                     if model.catalogState == .loaded && info == nil {
@@ -105,9 +133,15 @@ struct RunPanel: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 1) {
                 if let info {
-                    Text("\(BenchFmt.price(info.promptPrice)) / \(BenchFmt.price(info.completionPrice))")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        .help("USD per million prompt / completion tokens")
+                    if isDecision {
+                        Text("\(BenchFmt.price(info.promptPrice)) in · output free")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            .help("USD per million input tokens; decision models don't bill output")
+                    } else {
+                        Text("\(BenchFmt.price(info.promptPrice)) / \(BenchFmt.price(info.completionPrice))")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            .help("USD per million prompt / completion tokens")
+                    }
                 }
                 if done > 0 {
                     Text(done >= suite.decisions.count ? "complete" : "\(done)/\(suite.decisions.count) — resumes")
@@ -127,14 +161,17 @@ struct RunPanel: View {
     private var optionsPanel: some View {
         Panel("Options", systemImage: "slider.horizontal.3") {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
-                GridRow {
-                    Text("Reasoning effort").foregroundStyle(.secondary)
-                    Picker("", selection: $model.reasoningEffort) {
-                        Text("Provider default").tag(String?.none)
-                        ForEach(["minimal", "low", "medium", "high"], id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
+                if model.modelGroup == .chat || model.selectedChatCount > 0 {
+                    GridRow {
+                        Text("Reasoning effort").foregroundStyle(.secondary)
+                        Picker("", selection: $model.reasoningEffort) {
+                            Text("Provider default").tag(String?.none)
+                            ForEach(["minimal", "low", "medium", "high"], id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 180)
+                        .help("Chat LLMs only; decision models have no reasoning setting")
                     }
-                    .labelsHidden()
-                    .frame(width: 180)
                 }
                 GridRow {
                     Text("Concurrent requests").foregroundStyle(.secondary)
@@ -151,7 +188,9 @@ struct RunPanel: View {
                 }
             }
             .font(.callout)
-            Text("Runs are saved as they go and resume where they stopped. A different reasoning effort is a separate run.")
+            Text(model.modelGroup == .decision
+                 ? "Runs are saved as they go and resume where they stopped. Decision models get the JSON state v\(DecisionStateBuilder.version) (see Decisions → State sent)."
+                 : "Runs are saved as they go and resume where they stopped. A different reasoning effort is a separate run.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -166,7 +205,7 @@ struct RunPanel: View {
                     Text(model.selectedModels.isEmpty ? "–" : "unknown (prices unavailable)").font(.callout).foregroundStyle(.secondary)
                 }
             }
-            .help("Prompt length × price + an assumed completion budget per decision (~\(CostEstimator.completionTokens(reasoningEffort: model.reasoningEffort)) tokens at this reasoning effort).")
+            .help("Decision models: estimated input tokens × input price (output is free). Chat LLMs: prompt length × price + an assumed completion budget per decision (~\(CostEstimator.completionTokens(reasoningEffort: model.reasoningEffort)) tokens at this reasoning effort).")
             Spacer()
             if model.running {
                 Button(role: .cancel) { model.cancelRun() } label: { Label("Stop", systemImage: "stop.fill") }
@@ -207,7 +246,7 @@ struct LiveRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Image(systemName: p.kind == .baseline ? "cpu" : "sparkles").foregroundStyle(.secondary)
+                Image(systemName: p.kind.icon).foregroundStyle(.secondary)
                 Text(p.label).font(.callout.weight(.medium)).lineLimit(1)
                 Spacer()
                 if p.done >= p.total {
@@ -222,7 +261,8 @@ struct LiveRow: View {
                 stat("GTO score", p.done == 0 ? "–" : BenchFmt.score(p.score))
                 stat("EV loss", p.done == 0 ? "–" : BenchFmt.pctPot(p.evLossPot) + " pot")
                 stat("invalid", "\(p.invalid)")
-                if p.kind == .llm { stat("cost", Fmt.usd(p.cost)) }
+                if let m = p.mixedEVLossPot, p.kind != .baseline { stat("mixed loss", BenchFmt.pctPot(m) + " pot") }
+                if p.kind.isModel { stat("cost", Fmt.usd(p.cost)) }
             }
             if let e = p.lastError {
                 Text(e).font(.caption2).foregroundStyle(.secondary).lineLimit(1).help(e)
@@ -245,10 +285,14 @@ struct CatalogSheet: View {
     @Bindable var model: BenchLabModel
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var group: ModelGroup?
 
     private var filtered: [ModelInfo] {
         let q = query.lowercased()
-        return model.catalog.filter { q.isEmpty || $0.id.lowercased().contains(q) || $0.name.lowercased().contains(q) }
+        let g = group ?? model.modelGroup
+        return model.catalog.filter { m in
+            (m.isDecisionModel == (g == .decision)) && (q.isEmpty || m.id.lowercased().contains(q) || m.name.lowercased().contains(q))
+        }
     }
 
     var body: some View {
@@ -260,10 +304,26 @@ struct CatalogSheet: View {
                 case .failed(let e):
                     ContentUnavailableView("Catalog unavailable", systemImage: "wifi.exclamationmark", description: Text(e))
                 case .loaded:
+                    VStack(spacing: 0) {
+                    Picker("", selection: Binding(get: { group ?? model.modelGroup }, set: { group = $0 })) {
+                        ForEach(ModelGroup.allCases) { g in
+                            Text("\(g.title) (\(model.catalog.filter { $0.isDecisionModel == (g == .decision) }.count))").tag(g)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 360)
+                    .padding(8)
                     Table(filtered) {
                         TableColumn("Model") { m in
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(m.name).lineLimit(1)
+                                HStack(spacing: 6) {
+                                    Text(m.name).lineLimit(1)
+                                    if m.isDecisionModel { DecisionBadge() }
+                                    if DecisionRoster.suggested.contains(m.id) {
+                                        Image(systemName: "star.fill").font(.caption2).foregroundStyle(Theme.gold).help("Suggested for poker benchmarking")
+                                    }
+                                }
                                 Text(m.id).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }
@@ -272,15 +332,19 @@ struct CatalogSheet: View {
                         }
                         .width(70)
                         TableColumn("In $/M") { m in Text(BenchFmt.price(m.promptPrice)).monospacedDigit() }.width(64)
-                        TableColumn("Out $/M") { m in Text(BenchFmt.price(m.completionPrice)).monospacedDigit() }.width(64)
+                        TableColumn("Out $/M") { m in
+                            Text(m.isDecisionModel ? "free" : BenchFmt.price(m.completionPrice)).monospacedDigit()
+                        }
+                        .width(64)
                         TableColumn("") { m in
-                            if model.roster.contains(m.id) {
+                            if model.isOnRoster(m.id) {
                                 Image(systemName: "checkmark").foregroundStyle(Viz.good)
                             } else {
                                 Button("Add") { model.addToRoster(m.id) }.buttonStyle(.borderless)
                             }
                         }
                         .width(44)
+                    }
                     }
                 }
             }

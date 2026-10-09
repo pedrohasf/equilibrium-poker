@@ -13,10 +13,15 @@ public enum BenchCLI {
       eqbench bench suites                         List saved suites
       eqbench bench run --suite <id|file> --models a,b,c [--concurrency 8] [--reasoning low]
                         [--temperature 0] [--max-tokens 4000] [--limit N] [--fresh]
+                        System One decision models (e.g. typesafe/jev-1.13) are detected from the live
+                        catalog and asked a typed choice question; force with a `dm:` prefix
+                        (`chat:` forces a chat LLM). Chat-only options don't apply to them.
+      eqbench bench decision-models                List live OpenRouter decision models with prices
       eqbench bench baselines --suite <id|file>    Run the bot baselines (no API calls)
       eqbench bench report [--suite <id|file>]     Leaderboard (default: newest suite)
       eqbench bench show --suite <id> --decision d001   One decision: GTO, EVs and every answer
       eqbench bench prompt --suite <id> [--decision d001]  Print the exact LLM prompt
+      eqbench bench state --suite <id> [--decision d001] [--model id]  Print the JSON state + question sent to decision models
 
     Streets: flop, turn, river (flop solves take minutes). Scenarios: \(Scenarios.all.map(\.id).joined(separator: ", ")).
     Suites and runs are stored in ~/Library/Application Support/Equilibrium/{suites,runs}. Runs resume automatically.
@@ -33,6 +38,8 @@ public enum BenchCLI {
         case "report", "leaderboard": try report(opts)
         case "show": try show(opts)
         case "prompt": try prompt(opts)
+        case "state": try state(opts)
+        case "decision-models", "dms": try await listDecisionModels()
         default: print(help)
         }
     }
@@ -129,8 +136,54 @@ public enum BenchCLI {
         guard !models.isEmpty else { throw BenchError("--models is required (comma separated OpenRouter ids)") }
         let client = try OpenRouterClient.fromStoredKey(maxConcurrent: o.int("concurrency") ?? 8)
         let options = ChatOptions(temperature: o.double("temperature"), maxTokens: o.int("max-tokens"), reasoningEffort: o["reasoning"])
-        let players: [any DecisionMaker] = models.map { LLMDecisionMaker(model: $0, client: client, options: options) }
+        // Fetch the decision catalog once, only if some id isn't explicitly prefixed.
+        var catalog: Set<String>?
+        if models.contains(where: { !$0.hasPrefix("dm:") && !$0.hasPrefix("chat:") }) {
+            do {
+                catalog = Set(try await client.decisionModels().map(\.id))
+            } catch {
+                print("warning: could not load the decision-model catalog (\(error.localizedDescription)); "
+                      + "falling back to the suggested roster. Use dm:<id> to force a decision model.")
+            }
+        }
+        let players: [any DecisionMaker] = models.map { raw in
+            switch route(raw, decisionCatalog: catalog) {
+            case .decision(let id): return DecisionModelMaker(model: id, provider: client)
+            case .chat(let id): return LLMDecisionMaker(model: id, client: client, options: options)
+            }
+        }
+        for p in players where p.kind == .decisionModel {
+            print("  \(p.id): decision model (state v\(DecisionStateBuilder.version))")
+        }
         try await execute(suite: suite, players: players, o: o)
+    }
+
+    public enum Route: Equatable, Sendable {
+        case decision(String), chat(String)
+    }
+
+    /// `dm:<id>` → decision model, `chat:<id>` → chat LLM; otherwise decision model iff in the live
+    /// decision catalog (or, when the catalog is unavailable, in `DecisionRoster.suggested`).
+    public static func route(_ raw: String, decisionCatalog: Set<String>?) -> Route {
+        if raw.hasPrefix("dm:") { return .decision(String(raw.dropFirst(3))) }
+        if raw.hasPrefix("chat:") { return .chat(String(raw.dropFirst(5))) }
+        let known = decisionCatalog ?? Set(DecisionRoster.suggested)
+        return known.contains(raw) ? .decision(raw) : .chat(raw)
+    }
+
+    static func listDecisionModels() async throws {
+        let client = try OpenRouterClient.fromStoredKey()
+        let models = try await client.decisionModels().sorted { $0.id < $1.id }
+        guard !models.isEmpty else { print("The decision-model catalog is empty."); return }
+        let w = [44, 30, 9, 12, 9]
+        print(row(["ID", "Name", "Context", "Input $/M", "Suggested"], widths: w))
+        for m in models {
+            print(row([m.id, m.name, m.contextLength.map { "\($0 / 1000)k" } ?? "–",
+                       m.promptPricePerM.map { String(format: "$%.3f", $0) } ?? "?",
+                       DecisionRoster.suggested.contains(m.id) ? "yes" : ""], widths: w))
+        }
+        print("\nOutput is free for decision models; cost ≈ input tokens × input price "
+              + "(~\(BenchStore.suites().first.map { s in s.decisions.isEmpty ? 0 : s.decisions.reduce(0) { $0 + DecisionStateBuilder.estimatedInputTokens($1) } / s.decisions.count } ?? 0) tokens per decision on the newest suite).")
     }
 
     static func runBaselines(_ o: Options) async throws {
@@ -174,10 +227,25 @@ public enum BenchCLI {
         print("")
         for run in BenchStore.runs(suiteId: suite.id) {
             guard let r = run.result(for: d.id) else { continue }
-            let s = Scoring.score(d, choice: r.choice)
+            let s = Scoring.score(d, result: r, run: run)
             let choice = r.choice.map { d.actions[$0].label } ?? "INVALID"
-            print(row([run.label, choice, String(format: "-%.1f%% pot", s.evLossPot * 100)], widths: [34, 22, 14]))
+            var cols = [run.label, choice, String(format: "-%.1f%% pot", s.evLossPot * 100)]
+            if let p = r.actionProbabilities {
+                cols.append("p=[" + p.map { String(format: "%.2f", $0) }.joined(separator: " ") + "]")
+                if let m = s.mixedEVLossPot { cols.append(String(format: "mixed -%.1f%%", m * 100)) }
+                if let tv = s.tvDistance { cols.append(String(format: "TV %.2f", tv)) }
+                if let c = r.confidence { cols.append(String(format: "conf %.2f", c)) }
+            }
+            print(row(cols, widths: [34, 22, 14, 30, 14, 8, 10]))
         }
+    }
+
+    static func state(_ o: Options) throws {
+        let suite = try suite(o)
+        guard let d = suite.decision(o["decision"] ?? suite.decisions.first?.id ?? "") else { throw BenchError("No such decision") }
+        print("// \(d.id) · \(d.headline) · state v\(DecisionStateBuilder.version) · ~\(DecisionStateBuilder.estimatedInputTokens(d)) input tokens")
+        print("// POST https://openrouter.ai/api/alpha/decisions (question id is never shown to the model)")
+        print(DecisionStateBuilder.requestBody(d, model: o["model"] ?? DecisionRoster.suggested[0]).prettyText)
     }
 
     static func prompt(_ o: Options) throws {
@@ -199,47 +267,69 @@ public enum BenchCLI {
 
     public static func leaderboardText(suite: BenchmarkSuite, rows: [ModelScore]) -> String {
         var out: [String] = []
-        let w = [3, 34, 12, 15, 8, 6, 7, 8, 8, 8, 9]
-        out.append(row(["#", "Player", "GTO score", "EV loss %pot", "bb/dec", "Best", "GTO-ok", "Blunder", "Invalid", "Latency", "Cost"],
+        let w = [3, 34, 12, 15, 8, 6, 7, 8, 8, 13, 9, 7, 8, 9]
+        out.append(row(["#", "Player", "GTO score", "EV loss %pot", "bb/dec", "Best", "GTO-ok", "Blunder", "Invalid",
+                        "Mixed %pot", "TV dist", "P(best)", "Latency", "Cost"],
                        widths: w, rightAlignFrom: 2))
-        out.append(String(repeating: "─", count: w.reduce(0, +) + 2 * (w.count - 1)))
-        for (i, r) in rows.enumerated() {
-            let o = r.overall
-            let name = r.label + (r.isBaseline ? " ·bot" : "") + (r.isComplete ? "" : " (\(r.answered)/\(r.total))")
-            out.append(row([
-                "\(i + 1)", name,
-                String(format: "%.1f ±%.1f", o.gtoScore, o.gtoScoreCI),
-                String(format: "%.2f%% ±%.2f", o.meanEVLossPot * 100, o.meanEVLossPotCI * 100),
-                String(format: "%.3f", o.meanEVLoss),
-                String(format: "%.0f%%", o.accuracy * 100),
-                String(format: "%.0f%%", o.approvedRate * 100),
-                String(format: "%.0f%%", o.blunderRate * 100),
-                String(format: "%.0f%%", o.invalidRate * 100),
-                r.isBaseline ? "–" : String(format: "%.1fs", r.meanLatency),
-                r.isBaseline ? "–" : String(format: "$%.3f", r.totalCost),
-            ], widths: w, rightAlignFrom: 2))
+        let rule = String(repeating: "─", count: w.reduce(0, +) + 2 * (w.count - 1))
+        out.append(rule)
+        let rank = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($1.id, $0 + 1) })
+        for kind in PlayerKind.allCases.sorted(by: { $0.order < $1.order }) {
+            let group = rows.filter { $0.kind == kind }
+            guard !group.isEmpty else { continue }
+            out.append("\(kind.groupTitle) (\(group.count))")
+            for r in group {
+                let o = r.overall
+                let name = r.label + (r.isComplete ? "" : " (\(r.answered)/\(r.total))")
+                func opt(_ x: Double?, _ f: String, _ scale: Double = 1) -> String { x.map { String(format: f, $0 * scale) } ?? "–" }
+                out.append(row([
+                    "\(rank[r.id] ?? 0)", name,
+                    String(format: "%.1f ±%.1f", o.gtoScore, o.gtoScoreCI),
+                    String(format: "%.2f%% ±%.2f", o.meanEVLossPot * 100, o.meanEVLossPotCI * 100),
+                    String(format: "%.3f", o.meanEVLoss),
+                    String(format: "%.0f%%", o.accuracy * 100),
+                    String(format: "%.0f%%", o.approvedRate * 100),
+                    String(format: "%.0f%%", o.blunderRate * 100),
+                    String(format: "%.0f%%", o.invalidRate * 100),
+                    o.meanMixedEVLossPot.map { String(format: "%.2f%% ±%.2f", $0 * 100, (o.meanMixedEVLossPotCI ?? 0) * 100) } ?? "–",
+                    opt(o.meanTVDistance, "%.3f"),
+                    opt(o.meanBestActionProbability, "%.0f%%", 100),
+                    r.isBaseline ? "–" : String(format: "%.1fs", r.meanLatency),
+                    r.isBaseline ? "–" : String(format: "$%.3f", r.totalCost),
+                ], widths: w, rightAlignFrom: 2))
+            }
         }
         // Breakdowns.
         let streets = Street.allCases.filter { s in rows.contains { $0.byStreet[s.rawValue] != nil } }
         let types = DecisionType.allCases
         let bw = [34] + Array(repeating: 18, count: streets.count + types.count)
-        out.append("")
-        out.append("GTO score / EV loss (% pot) by street and decision type")
-        out.append(row(["Player"] + streets.map { "\($0.title) (n=\(suite.countByStreet[$0] ?? 0))" }
-                       + types.map { t in "\(t.title) (n=\(suite.decisions.filter { $0.decisionType == t }.count))" },
-                       widths: bw, rightAlignFrom: 1))
-        for r in rows {
-            func cell(_ b: ScoreBucket?) -> String {
-                guard let b, b.n > 0 else { return "–" }
-                return String(format: "%5.1f / %5.2f%%", b.gtoScore, b.meanEVLossPot * 100)
-            }
-            out.append(row([r.label] + streets.map { cell(r.byStreet[$0.rawValue]) } + types.map { cell(r.byType[$0.rawValue]) },
+        func breakdown(_ title: String, _ subset: [ModelScore], _ cell: (ScoreBucket?) -> String) {
+            guard !subset.isEmpty else { return }
+            out.append("")
+            out.append(title)
+            out.append(row(["Player"] + streets.map { "\($0.title) (n=\(suite.countByStreet[$0] ?? 0))" }
+                           + types.map { t in "\(t.title) (n=\(suite.decisions.filter { $0.decisionType == t }.count))" },
                            widths: bw, rightAlignFrom: 1))
+            for r in subset {
+                out.append(row([r.label] + streets.map { cell(r.byStreet[$0.rawValue]) } + types.map { cell(r.byType[$0.rawValue]) },
+                               widths: bw, rightAlignFrom: 1))
+            }
+        }
+        breakdown("GTO score / EV loss (% pot) by street and decision type", rows) { b in
+            guard let b, b.n > 0 else { return "–" }
+            return String(format: "%5.1f / %5.2f%%", b.gtoScore, b.meanEVLossPot * 100)
+        }
+        breakdown("Mixed EV loss (% pot) / TV distance by street and decision type", rows.filter(\.hasDistribution)) { b in
+            guard let b, let m = b.meanMixedEVLossPot else { return "–" }
+            return String(format: "%5.2f%% / %.2f", m * 100, b.meanTVDistance ?? 0)
         }
         out.append("")
         out.append("GTO score = mean of 1 − (best − chosen)/(best − worst) × 100 · EV loss = best EV − chosen EV · "
                    + "Best = within \(String(format: "%.2g", Scoring.bestTolerance * 100))% pot of best · GTO-ok = GTO plays it ≥\(Int(Scoring.approvedFrequency * 100))% · "
                    + "Blunder = loss > \(Int(Scoring.blunderThreshold * 100))% pot · ± = 95% CI · invalid answers score as the worst action.")
+        out.append("Players with action probabilities (decision models, sampled GTO): Mixed = Σ p(a)·loss(a), the EV lost playing the "
+                   + "reported distribution · TV dist = ½Σ|p − GTO| for hero's hand (0 = equilibrium mix, 1 = disjoint) · "
+                   + "P(best) = mean probability on the best-EV action(s) (calibration).")
         return out.joined(separator: "\n")
     }
 
